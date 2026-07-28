@@ -14,8 +14,13 @@ stitch lines back into paragraphs before anyone hears them.
 """
 
 import io
+import os
 import re
+import tempfile
 
+import ebooklib
+from bs4 import BeautifulSoup
+from ebooklib import epub
 from pypdf import PdfReader
 
 
@@ -31,10 +36,10 @@ def extract_text(filename, data):
         return _tidy(_from_txt(data))
     if name.endswith(".pdf"):
         return _tidy(_from_pdf(data))
+    if name.endswith(".epub"):
+        return _tidy(_from_epub(data))
 
-    raise ExtractionError(
-        "Only .txt and .pdf files are supported for now. (EPUB is on the roadmap.)"
-    )
+    raise ExtractionError("Only .txt, .pdf, and .epub files are supported.")
 
 
 def _from_txt(data):
@@ -71,6 +76,52 @@ def _from_pdf(data):
             "No selectable text found in this PDF — it's probably a scan "
             "(pictures of pages). Reading scans needs OCR, which isn't built yet."
         )
+    return text
+
+
+def _from_epub(data):
+    """An EPUB is a ZIP of web pages (XHTML chapters) plus a manifest saying
+    what order they go in. Unlike PDFs, the paragraphs in it are REAL —
+    no line-wrap or hyphenation damage to repair — so this is the cleanest
+    input format the app has."""
+    # ebooklib wants a file path, not bytes, so park the upload in a
+    # temporary file for the duration of the parse.
+    handle, temp_path = tempfile.mkstemp(suffix=".epub")
+    try:
+        with os.fdopen(handle, "wb") as f:
+            f.write(data)
+        try:
+            book = epub.read_epub(temp_path)
+        except Exception:
+            raise ExtractionError("That file doesn't appear to be a valid EPUB.")
+    finally:
+        os.unlink(temp_path)
+
+    paragraphs = []
+    # The "spine" is the book's reading order. Each entry names a chapter.
+    for item_id, _linear in book.spine:
+        item = book.get_item_with_id(item_id)
+        if item is None or item.get_type() != ebooklib.ITEM_DOCUMENT:
+            continue
+
+        soup = BeautifulSoup(item.get_content(), "html.parser")
+
+        # Pull text per block element (paragraphs, headings, list items…)
+        # so real paragraph breaks survive as blank lines for _tidy.
+        blocks = soup.find_all(["p", "h1", "h2", "h3", "h4", "h5", "h6",
+                                "li", "blockquote"])
+        if blocks:
+            paragraphs.extend(b.get_text(" ", strip=True) for b in blocks)
+        else:
+            # Some books mark paragraphs unusually (bare <div>s) — fall
+            # back to grabbing all the chapter's text, one line per element.
+            paragraphs.extend(
+                line.strip() for line in soup.get_text("\n").splitlines()
+            )
+
+    text = "\n\n".join(p for p in paragraphs if p)
+    if not text.strip():
+        raise ExtractionError("No readable text found in this EPUB.")
     return text
 
 

@@ -66,11 +66,13 @@ Then open `listen.html` in a browser and press play.
 - [x] Phase 5 — real player: speed control, download *(built 2026-07-29 —
       the full MVP is now working)*
 
+- [x] EPUB extraction *(built 2026-07-29 — ebooklib + BeautifulSoup branch
+      in `extract.py`; EPUBs extract cleaner than PDFs)*
+
 ### Fast-follows worth doing next (not yet built)
 
 - MP3 downloads — WAV is ~3 MB per minute; an hour of audio is ~170 MB.
   Converting with ffmpeg would cut that ~6x.
-- EPUB extraction (a third branch in `extract.py`)
 - Job cleanup — old WAVs accumulate in `audio/`
 - Warm-up ping to hide the cold start; longer-term, self-host Kokoro
   (kills cold starts, the ~real-time synthesis ceiling, and per-char costs)

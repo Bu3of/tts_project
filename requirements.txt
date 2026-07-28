@@ -8,3 +8,5 @@ fastapi         # the web framework: routes, request validation
 uvicorn         # the server that runs the FastAPI app
 pypdf           # reads text out of PDF files, for extract.py
 python-multipart # lets FastAPI receive file uploads
+ebooklib        # parses EPUB structure (chapters + reading order), for extract.py
+beautifulsoup4  # strips HTML tags from EPUB chapters down to text
