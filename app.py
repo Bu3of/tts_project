@@ -19,6 +19,7 @@ import io
 import uuid
 import wave
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
@@ -99,8 +100,18 @@ async def extract(file: UploadFile = File(...)):
 # Conversion jobs (Phase 4)
 # ---------------------------------------------------------------------------
 
+# The voices the page offers. Validated here so arbitrary strings from the
+# browser never reach the TTS API. (Kokoro has 54 voices; this is a curated
+# English selection — af/am = American female/male, bf/bm = British.)
+ALLOWED_VOICES = {
+    "af_heart", "af_bella", "af_nicole", "af_sky", "am_adam",
+    "am_michael", "bf_emma", "bf_isabella", "bm_george", "bm_fable",
+}
+
+
 class JobRequest(BaseModel):
     text: str
+    voice: str = "af_heart"
 
 
 @app.post("/api/jobs")
@@ -114,6 +125,8 @@ def create_job(request: JobRequest, background: BackgroundTasks):
             detail=f"Text is {len(text):,} characters; the current limit is "
                    f"{MAX_JOB_CHARS:,}.",
         )
+    if request.voice not in ALLOWED_VOICES:
+        raise HTTPException(status_code=400, detail="Unknown voice.")
 
     # Normalize BEFORE chunking, so things like "£3,000" can't be sliced in
     # half by a chunk boundary, and the budget measures what will be spoken.
@@ -129,7 +142,7 @@ def create_job(request: JobRequest, background: BackgroundTasks):
 
     # add_task means: send the response NOW, run _run_job right after.
     # The browser gets its claim ticket immediately and polls while we work.
-    background.add_task(_run_job, job_id, chunks)
+    background.add_task(_run_job, job_id, chunks, request.voice)
     return {"job_id": job_id, "total_chunks": len(chunks)}
 
 
@@ -146,16 +159,40 @@ def job_status(job_id: str):
 
 @app.get("/api/jobs/{job_id}/audio")
 def job_audio(job_id: str):
-    job = JOBS.get(job_id)
-    if job is None:
+    # Route parameters come from the browser, i.e. from anyone. Since this
+    # id becomes part of a file path, refuse anything that isn't plain
+    # letters/digits — otherwise "../" tricks could reach files outside
+    # the audio folder.
+    if not job_id.isalnum():
         raise HTTPException(status_code=404, detail="Unknown job.")
-    if job["status"] != "done":
+
+    job = JOBS.get(job_id)
+    if job is not None and job["status"] != "done":
         raise HTTPException(
             status_code=409,  # "conflict": the request is fine, the timing isn't
             detail=f"Job is {job['status']} ({job['done_chunks']}/"
                    f"{job['total_chunks']} chunks).",
         )
-    return FileResponse(AUDIO_DIR / f"{job_id}.wav", media_type="audio/wav")
+
+    # No entry in JOBS doesn't necessarily mean no audio: the WAV outlives
+    # server restarts even though the in-memory job board doesn't. Serving
+    # from disk here is what lets "resume listening" work across restarts.
+    path = AUDIO_DIR / f"{job_id}.wav"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Unknown or expired conversion.")
+    return FileResponse(path, media_type="audio/wav")
+
+
+@app.get("/api/jobs/{job_id}/chunks/{index}")
+def job_chunk(job_id: str, index: int):
+    """One chunk's audio, available as soon as THAT chunk is synthesized —
+    this is what lets playback start while the rest still generates."""
+    if not job_id.isalnum():
+        raise HTTPException(status_code=404, detail="Unknown job.")
+    path = AUDIO_DIR / job_id / f"{index:04d}.wav"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="That chunk isn't ready (or doesn't exist).")
+    return FileResponse(path, media_type="audio/wav")
 
 
 # DeepInfra serves Kokoro at roughly real-time speed per request (measured
@@ -165,11 +202,13 @@ def job_audio(job_id: str):
 MAX_PARALLEL_REQUESTS = 4
 
 
-def _run_job(job_id, chunks):
-    """The background worker: synthesize chunks (several at a time), append
-    them to the output WAV in order, and keep the job board updated so the
-    poll route has news to report."""
+def _run_job(job_id, chunks, voice):
+    """The background worker: synthesize chunks (several at a time), save
+    each one as its own file for progressive playback, append it to the
+    stitched WAV, and keep the job board updated for the poll route."""
     job = JOBS[job_id]
+    chunk_dir = AUDIO_DIR / job_id       # per-chunk files live in here
+    chunk_dir.mkdir(exist_ok=True)
     output_path = AUDIO_DIR / f"{job_id}.wav"
     output = None
     try:
@@ -179,9 +218,14 @@ def _run_job(job_id, chunks):
             # simple append, and the audio can never come out shuffled.
             # (Progress may pause then jump a few chunks at once; that's
             # just in-order delivery doing its job.)
-            for i, audio_bytes in enumerate(pool.map(synthesize, chunks)):
-                # A WAV file is a small header (sample rate etc.) + raw audio
-                # frames. Stitching = write one header, then everyone's frames.
+            speak = partial(synthesize, voice=voice)
+            for i, audio_bytes in enumerate(pool.map(speak, chunks)):
+                # Each chunk saved alone -> playable the moment it's done...
+                (chunk_dir / f"{i:04d}.wav").write_bytes(audio_bytes)
+
+                # ...AND appended to the one big WAV. A WAV file is a small
+                # header (sample rate etc.) + raw audio frames, so stitching
+                # = write one header, then everyone's frames.
                 with wave.open(io.BytesIO(audio_bytes)) as w:
                     if output is None:
                         output = wave.open(str(output_path), "wb")

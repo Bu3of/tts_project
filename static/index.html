@@ -22,7 +22,6 @@
     button {
       font: inherit;
       padding: 0.6rem 1.5rem;
-      margin-top: 0.75rem;
       cursor: pointer;
     }
     button:disabled { cursor: wait; opacity: 0.6; }
@@ -30,6 +29,12 @@
     .hint { color: #888; font-size: 0.85rem; margin: 0.5rem 0; }
     progress { width: 100%; margin-top: 0.75rem; }
     audio { width: 100%; margin-top: 1rem; }
+    .controls-row {
+      display: flex;
+      gap: 1rem;
+      align-items: center;
+      margin-top: 0.75rem;
+    }
     .player-extras {
       display: flex;
       justify-content: space-between;
@@ -38,13 +43,32 @@
       font-size: 0.9rem;
     }
     select { font: inherit; }
+    #resumeBox {
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      padding: 0.75rem 1rem;
+      margin-bottom: 1.5rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 1rem;
+      font-size: 0.9rem;
+    }
   </style>
 </head>
 <body>
   <h1>Document to Speech</h1>
+
+  <!-- Shown only when a previous listen was left unfinished. -->
+  <div id="resumeBox" hidden>
+    <span>Continue listening: <strong id="resumeTitle"></strong>
+      at <span id="resumeTime"></span></span>
+    <button id="resumeBtn">Resume</button>
+  </div>
+
   <p>
-    Upload a document or paste text, press Speak, and it's narrated in the
-    background — watch the progress bar, then listen.
+    Upload a document or paste text, press Speak — playback starts as soon
+    as the first piece is ready, while the rest generates in the background.
   </p>
 
   <input type="file" id="file" accept=".txt,.pdf,.epub">
@@ -52,14 +76,29 @@
 
   <textarea id="text" placeholder="Paste your text here…"></textarea>
   <div id="count" class="hint"></div>
-  <br>
-  <button id="speak">Speak</button>
+
+  <div class="controls-row">
+    <label>
+      Voice
+      <select id="voice">
+        <option value="af_heart" selected>Heart — US female</option>
+        <option value="af_bella">Bella — US female</option>
+        <option value="af_nicole">Nicole — US female</option>
+        <option value="af_sky">Sky — US female</option>
+        <option value="am_adam">Adam — US male</option>
+        <option value="am_michael">Michael — US male</option>
+        <option value="bf_emma">Emma — UK female</option>
+        <option value="bf_isabella">Isabella — UK female</option>
+        <option value="bm_george">George — UK male</option>
+        <option value="bm_fable">Fable — UK male</option>
+      </select>
+    </label>
+    <button id="speak">Speak</button>
+  </div>
+
   <p id="status"></p>
   <progress id="progress" hidden></progress>
 
-  <!-- The player row appears once a conversion finishes. The <audio> element
-       itself provides play/pause/seek/volume; we add what it lacks: speed
-       control and a download link. -->
   <div id="playerRow" hidden>
     <audio id="player" controls></audio>
     <div class="player-extras">
@@ -74,12 +113,12 @@
           <option value="2">2×</option>
         </select>
       </label>
-      <a id="download" download="narration.wav">Download audio</a>
+      <a id="download" download="narration.wav" hidden>Download audio</a>
     </div>
   </div>
 
   <script>
-    // Grab the page elements once, by their id="" attributes above.
+    // ---- element references ----------------------------------------------
     const textBox = document.getElementById("text");
     const button = document.getElementById("speak");
     const status = document.getElementById("status");
@@ -90,18 +129,125 @@
     const playerRow = document.getElementById("playerRow");
     const speed = document.getElementById("speed");
     const download = document.getElementById("download");
+    const voice = document.getElementById("voice");
+    const resumeBox = document.getElementById("resumeBox");
+    const resumeTitle = document.getElementById("resumeTitle");
+    const resumeTime = document.getElementById("resumeTime");
+    const resumeBtn = document.getElementById("resumeBtn");
 
-    // Playback speed: playbackRate is built into every <audio> element —
-    // browsers pitch-correct automatically, so 1.5× is faster, not squeaky.
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const fmtTime = (s) => {
+      s = Math.floor(s);
+      const m = Math.floor(s / 60), h = Math.floor(m / 60);
+      const mm = String(m % 60).padStart(2, "0"), ss = String(s % 60).padStart(2, "0");
+      return h > 0 ? `${h}:${mm}:${ss}` : `${m % 60}:${ss}`;
+    };
+
+    // ---- playback state --------------------------------------------------
+    // While a job generates, we play chunk files one by one ("chunks" mode);
+    // once the job is done, we switch to the stitched file ("full" mode),
+    // which restores the full seek bar. playedSeconds tracks how much audio
+    // came before the current chunk, so the position carries over exactly.
+    let mode = "full";        // "chunks" | "full"
+    let currentJob = null;    // { id, title, total }
+    let chunkIndex = 0;
+    let playedSeconds = 0;
+    let readyChunks = 0;
+    let jobDone = false;
+    let waitingForChunk = false;
+    let pendingSeek = null;   // seek to apply once metadata loads
+
+    player.addEventListener("loadedmetadata", () => {
+      player.playbackRate = parseFloat(speed.value);
+      if (pendingSeek !== null) {
+        player.currentTime = pendingSeek;
+        pendingSeek = null;
+      }
+    });
     speed.addEventListener("change", () => {
       player.playbackRate = parseFloat(speed.value);
     });
-    // Loading a new clip can reset the rate; reapply the choice each time.
-    player.addEventListener("loadedmetadata", () => {
-      player.playbackRate = parseFloat(speed.value);
+
+    function playChunk(i) {
+      player.src = `/api/jobs/${currentJob.id}/chunks/${i}`;
+      player.play();
+    }
+
+    function switchToFull(offsetSeconds) {
+      mode = "full";
+      pendingSeek = offsetSeconds;
+      player.src = `/api/jobs/${currentJob.id}/audio`;
+      player.play();
+    }
+
+    // When a chunk finishes, move to the next — or, if the job has finished
+    // meanwhile, hop to the stitched file at the exact same position.
+    player.addEventListener("ended", () => {
+      if (mode !== "chunks") {
+        // Finished listening to the whole thing: nothing left to resume.
+        localStorage.removeItem("resume");
+        resumeBox.hidden = true;
+        return;
+      }
+      playedSeconds += player.duration;
+      chunkIndex += 1;
+      if (jobDone) {
+        switchToFull(playedSeconds);
+      } else if (chunkIndex < readyChunks) {
+        playChunk(chunkIndex);
+      } else {
+        waitingForChunk = true;
+        status.textContent = "Caught up with the generator — waiting for the next chunk…";
+      }
     });
 
-    // Live character count under the textarea (the cap is now 200,000).
+    // ---- remember position (resume) --------------------------------------
+    let lastSave = 0;
+    player.addEventListener("timeupdate", () => {
+      if (!currentJob || player.paused) return;
+      const now = Date.now();
+      if (now - lastSave < 3000) return;   // save at most every 3 s
+      lastSave = now;
+      const seconds = mode === "chunks"
+        ? playedSeconds + player.currentTime
+        : player.currentTime;
+      localStorage.setItem("resume", JSON.stringify({
+        jobId: currentJob.id, title: currentJob.title, seconds: seconds,
+      }));
+    });
+
+    // Offer to pick up where the last session left off.
+    const saved = JSON.parse(localStorage.getItem("resume") || "null");
+    if (saved && saved.seconds > 10) {
+      resumeTitle.textContent = saved.title;
+      resumeTime.textContent = fmtTime(saved.seconds);
+      resumeBox.hidden = false;
+    }
+
+    resumeBtn.addEventListener("click", () => {
+      currentJob = { id: saved.jobId, title: saved.title, total: 0 };
+      mode = "full";
+      jobDone = true;
+      pendingSeek = saved.seconds;
+      player.src = `/api/jobs/${saved.jobId}/audio`;
+      download.href = `/api/jobs/${saved.jobId}/audio`;
+      download.hidden = false;
+      playerRow.hidden = false;
+      resumeBox.hidden = true;
+      player.play();
+      status.textContent = "Resumed.";
+    });
+
+    // The server forgets conversions eventually (files get cleaned up);
+    // fail politely instead of with a dead player.
+    player.addEventListener("error", () => {
+      if (player.src) {
+        status.textContent = "That audio is no longer available — convert the document again.";
+        playerRow.hidden = true;
+      }
+    });
+
+    // ---- character counter -----------------------------------------------
     function updateCount() {
       const n = textBox.value.length;
       counter.textContent = n === 0 ? "" : n.toLocaleString() + " characters"
@@ -109,31 +255,19 @@
     }
     textBox.addEventListener("input", updateCount);
 
-    // When a file is chosen, send it to the server for extraction and put
-    // the cleaned text into the textarea for review before speaking.
+    // ---- file upload → extraction ----------------------------------------
     filePicker.addEventListener("change", async () => {
       const file = filePicker.files[0];
       if (!file) return;
-
       status.textContent = "Extracting text from " + file.name + "…";
-
-      // FormData is how browsers package file uploads — the same format a
-      // plain HTML <form> would send, built by hand.
       const formData = new FormData();
       formData.append("file", file);
-
       try {
-        const response = await fetch("/api/extract", {
-          method: "POST",
-          body: formData,
-        });
-
+        const response = await fetch("/api/extract", { method: "POST", body: formData });
         if (!response.ok) {
-          const error = await response.json();
-          status.textContent = "Error: " + error.detail;
+          status.textContent = "Error: " + (await response.json()).detail;
           return;
         }
-
         const result = await response.json();
         textBox.value = result.text;
         updateCount();
@@ -145,9 +279,7 @@
       }
     });
 
-    // A tiny helper: "wait this many milliseconds" as an awaitable promise.
-    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
+    // ---- the main event: convert & play progressively --------------------
     button.addEventListener("click", async () => {
       const text = textBox.value.trim();
       if (!text) {
@@ -155,62 +287,93 @@
         return;
       }
 
-      // Disable the button so an impatient double-click doesn't pay twice.
       button.disabled = true;
       playerRow.hidden = true;
+      download.hidden = true;
+      resumeBox.hidden = true;
       status.textContent = "Starting the job…";
 
       try {
-        // Step 1: hand the text over, get back a claim ticket (job id).
         const response = await fetch("/api/jobs", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: text }),
+          body: JSON.stringify({ text: text, voice: voice.value }),
         });
-
         if (!response.ok) {
-          const error = await response.json();
-          status.textContent = "Error: " + error.detail;
+          status.textContent = "Error: " + (await response.json()).detail;
           return;
         }
 
         const { job_id, total_chunks } = await response.json();
+        currentJob = { id: job_id, title: text.slice(0, 60), total: total_chunks };
+        mode = "chunks";
+        chunkIndex = 0;
+        playedSeconds = 0;
+        readyChunks = 0;
+        jobDone = false;
+        waitingForChunk = false;
+
         progress.max = total_chunks;
         progress.value = 0;
         progress.hidden = false;
 
-        // Step 2: poll the ticket until the kitchen says it's ready.
+        let started = false;
         while (true) {
-          await sleep(1500);
           const job = await (await fetch("/api/jobs/" + job_id)).json();
+          readyChunks = job.done_chunks;
           progress.value = job.done_chunks;
 
           if (job.status === "error") {
             status.textContent = "Error: " + job.error;
             return;
           }
+
+          // The moment chunk one exists, start listening.
+          if (!started && readyChunks >= 1) {
+            started = true;
+            playerRow.hidden = false;
+            playChunk(0);
+          }
+          // If playback caught up and stalled, a fresh chunk un-stalls it.
+          if (waitingForChunk && chunkIndex < readyChunks) {
+            waitingForChunk = false;
+            playChunk(chunkIndex);
+          }
+
           if (job.status === "done") break;
 
-          status.textContent = "Generating chunk "
+          status.textContent = (started ? "Playing — generating chunk " : "Generating chunk ")
             + Math.min(job.done_chunks + 1, total_chunks) + " of " + total_chunks + "…"
             + (job.done_chunks === 0
                ? " (the first chunk can take a minute or two if the model is waking up)"
                : "");
+          await sleep(1500);
         }
 
-        // Step 3: the finished WAV now lives on the server — point both the
-        // player and the download link at its URL.
-        const audioUrl = "/api/jobs/" + job_id + "/audio";
-        player.src = audioUrl;
-        download.href = audioUrl;
-        playerRow.hidden = false;
-        player.play();
-        status.textContent = "Done — " + total_chunks + " chunk"
-          + (total_chunks === 1 ? "" : "s") + " stitched together.";
+        jobDone = true;
+        download.href = "/api/jobs/" + job_id + "/audio";
+        download.hidden = false;
+        status.textContent = "All " + total_chunks + " chunk"
+          + (total_chunks === 1 ? "" : "s") + " generated.";
+
+        // If the player stalled waiting right as the job finished, release it.
+        if (waitingForChunk) {
+          waitingForChunk = false;
+          if (chunkIndex < total_chunks) {
+            playChunk(chunkIndex);
+          } else {
+            switchToFull(playedSeconds);
+          }
+        }
+        // If nothing ever started (e.g. a 1-chunk job that finished between
+        // polls), just play the finished audio.
+        if (!started) {
+          playerRow.hidden = false;
+          switchToFull(0);
+        }
       } catch (networkError) {
         status.textContent = "Could not reach the server — is uvicorn running?";
       } finally {
-        // Runs whether we succeeded or failed: always re-enable the button.
         button.disabled = false;
         progress.hidden = true;
       }

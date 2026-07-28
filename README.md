@@ -68,6 +68,13 @@ Then open `listen.html` in a browser and press play.
 
 - [x] EPUB extraction *(built 2026-07-29 — ebooklib + BeautifulSoup branch
       in `extract.py`; EPUBs extract cleaner than PDFs)*
+- [x] Progressive playback — audio starts on the first finished chunk and
+      hands over to the stitched file (with full seek bar) when the job
+      completes *(built 2026-07-29)*
+- [x] Voice picker — 10 curated Kokoro voices, validated server-side
+- [x] Resume — the browser remembers your last listening position
+      (localStorage; audio survives server restarts because the WAV is
+      served from disk even after the in-memory job board forgets)
 
 ### Fast-follows worth doing next (not yet built)
 
