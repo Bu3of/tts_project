@@ -75,6 +75,8 @@ Then open `listen.html` in a browser and press play.
 - [x] Resume — the browser remembers your last listening position
       (localStorage; audio survives server restarts because the WAV is
       served from disk even after the in-memory job board forgets)
+- [x] Skip ±15 s buttons — chunk-boundary-aware while a job is still
+      generating (translates the target across per-chunk files)
 
 ### Fast-follows worth doing next (not yet built)
 

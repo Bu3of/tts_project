@@ -42,6 +42,8 @@
       margin-top: 0.5rem;
       font-size: 0.9rem;
     }
+    .transport { display: flex; gap: 0.5rem; align-items: center; }
+    .transport button { padding: 0.3rem 0.7rem; }
     select { font: inherit; }
     #resumeBox {
       border: 1px solid #ddd;
@@ -102,17 +104,21 @@
   <div id="playerRow" hidden>
     <audio id="player" controls></audio>
     <div class="player-extras">
-      <label>
-        Speed
-        <select id="speed">
-          <option value="0.75">0.75×</option>
-          <option value="1" selected>1×</option>
-          <option value="1.25">1.25×</option>
-          <option value="1.5">1.5×</option>
-          <option value="1.75">1.75×</option>
-          <option value="2">2×</option>
-        </select>
-      </label>
+      <div class="transport">
+        <button id="back15" title="Back 15 seconds">⟲ 15s</button>
+        <button id="fwd15" title="Forward 15 seconds">15s ⟳</button>
+        <label>
+          Speed
+          <select id="speed">
+            <option value="0.75">0.75×</option>
+            <option value="1" selected>1×</option>
+            <option value="1.25">1.25×</option>
+            <option value="1.5">1.5×</option>
+            <option value="1.75">1.75×</option>
+            <option value="2">2×</option>
+          </select>
+        </label>
+      </div>
       <a id="download" download="narration.wav" hidden>Download audio</a>
     </div>
   </div>
@@ -156,9 +162,17 @@
     let jobDone = false;
     let waitingForChunk = false;
     let pendingSeek = null;   // seek to apply once metadata loads
+    let chunkDurations = [];  // length of each chunk we've loaded, in seconds
+
+    // Sum of all chunk durations before chunk i — i.e., where chunk i
+    // starts on the document's overall timeline.
+    const cumBefore = (i) => chunkDurations.slice(0, i).reduce((a, b) => a + (b || 0), 0);
 
     player.addEventListener("loadedmetadata", () => {
       player.playbackRate = parseFloat(speed.value);
+      if (mode === "chunks") {
+        chunkDurations[chunkIndex] = player.duration;
+      }
       if (pendingSeek !== null) {
         player.currentTime = pendingSeek;
         pendingSeek = null;
@@ -167,6 +181,44 @@
     speed.addEventListener("change", () => {
       player.playbackRate = parseFloat(speed.value);
     });
+
+    // ---- skip back/forward 15 s ------------------------------------------
+    // In "full" mode this is one line. In "chunks" mode, the target moment
+    // may live in a DIFFERENT chunk file, so we translate: figure out which
+    // chunk the target lands in and how far into it, then jump there.
+    function skip(delta) {
+      if (!currentJob) return;
+
+      if (mode === "full") {
+        player.currentTime = Math.max(0, player.currentTime + delta);
+        return;
+      }
+
+      const target = player.currentTime + delta;
+      if (target < 0 && chunkIndex > 0) {
+        // Lands in the previous chunk (whose duration we know — we played it).
+        chunkIndex -= 1;
+        playedSeconds = cumBefore(chunkIndex);
+        pendingSeek = Math.max(0, (chunkDurations[chunkIndex] || 0) + target);
+        playChunk(chunkIndex);
+      } else if (player.duration && target > player.duration) {
+        // Lands in the next chunk — if it's been generated yet.
+        if (chunkIndex + 1 < readyChunks) {
+          chunkIndex += 1;
+          playedSeconds = cumBefore(chunkIndex);
+          pendingSeek = target - player.duration;
+          playChunk(chunkIndex);
+        } else {
+          // Can't skip into audio that doesn't exist yet: go to the end of
+          // what we have, which triggers the normal "waiting" flow.
+          player.currentTime = player.duration;
+        }
+      } else {
+        player.currentTime = Math.max(0, target);
+      }
+    }
+    document.getElementById("back15").addEventListener("click", () => skip(-15));
+    document.getElementById("fwd15").addEventListener("click", () => skip(15));
 
     function playChunk(i) {
       player.src = `/api/jobs/${currentJob.id}/chunks/${i}`;
@@ -189,8 +241,8 @@
         resumeBox.hidden = true;
         return;
       }
-      playedSeconds += player.duration;
       chunkIndex += 1;
+      playedSeconds = cumBefore(chunkIndex);
       if (jobDone) {
         switchToFull(playedSeconds);
       } else if (chunkIndex < readyChunks) {
@@ -312,6 +364,7 @@
         readyChunks = 0;
         jobDone = false;
         waitingForChunk = false;
+        chunkDurations = [];
 
         progress.max = total_chunks;
         progress.value = 0;
