@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Phase 1 — hear the result</title>
+  <style>
+    /* Just enough styling to be pleasant — the real player comes in a later phase. */
+    body {
+      font-family: system-ui, sans-serif;
+      max-width: 30rem;
+      margin: 4rem auto;
+      padding: 0 1rem;
+    }
+    h2 { margin-bottom: 0.25rem; }
+    .note { color: #666; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>Phase 1 test</h1>
+  <p>
+    Two models, same price class (~$1 per million characters), your ears as judge.
+  </p>
+
+  <!-- The built-in <audio> element gives us play/pause/seek for free.
+       This same element, plus speed control, becomes the real player later. -->
+  <h2>Kokoro-82M</h2>
+  <p class="note">voice: af_bella — the current default plan ($0.62/M chars)</p>
+  <audio controls src="output.wav"></audio>
+
+  <h2>Chatterbox Turbo</h2>
+  <p class="note">Resemble AI's open model ($1.00/M chars)</p>
+  <audio controls src="chatterbox.wav"></audio>
+
+  <hr style="margin: 2rem 0;">
+
+  <h1>Long-form fidelity test</h1>
+  <p>
+    Same 189-word passage through both models. Follow along with the text and
+    listen for <strong>skipped, repeated, or invented words</strong> — pay
+    special attention to the dates, times, and prices, and check that the
+    final sentence ("…that was the engineering.") is actually there.
+  </p>
+
+  <details>
+    <summary><strong>Show the passage text</strong> (read along while listening)</summary>
+    <p style="line-height: 1.6;">
+      On the morning of March 3rd, 1943, Dr. Eleanor Vance stepped onto the
+      platform at King's Cross station carrying a battered leather case and 27
+      pages of notes. The 8:15 train to Edinburgh was late — it usually was —
+      so she reread her calculations for the fifth time. If the numbers held,
+      the new alloy would tolerate temperatures above 1,200 degrees Celsius,
+      roughly 40 percent better than anything the ministry had tested before.
+      "It isn't elegant," she had told the review board, "but it works, and
+      working is what wins wars." The board had allocated her £3,000 and six
+      months; she intended to need neither. Beyond the station's glass roof,
+      barrage balloons drifted like patient whales. Eleanor found an empty
+      compartment, spread her papers across the seat, and began again from
+      first principles: measure twice, assume nothing, and never trust a
+      result you couldn't reproduce on a Tuesday. By the time the train
+      finally lurched north, she had filled three more pages and drunk one
+      truly terrible cup of tea. The work, she thought, was the easy part.
+      Convincing people to believe it — that was the engineering.
+    </p>
+  </details>
+
+  <h2>Kokoro-82M</h2>
+  <p class="note">voice: af_heart (Kokoro's top-rated voice) — 75s of audio</p>
+  <audio controls src="long_kokoro.wav"></audio>
+
+  <h2>Chatterbox Turbo</h2>
+  <p class="note">default voice — 65s of audio</p>
+  <audio controls src="long_chatterbox.wav"></audio>
+
+  <h2>Kokoro-82M + our text normalizer</h2>
+  <p class="note">
+    Same voice (af_heart), but the text was preprocessed by normalize.py first:
+    "1,200" → "one thousand two hundred", "£3,000" → "three thousand pounds",
+    "8:15" → "eight fifteen", "3rd, 1943" → "third, nineteen forty-three".
+  </p>
+  <audio controls src="long_kokoro_fixed.wav"></audio>
+
+  <p class="note">
+    Hearing nothing? Make sure this file is opened from the project folder
+    (so the .wav files sit right next to it), and that hello_kokoro.py
+    printed "Done!" without errors.
+  </p>
+</body>
+</html>

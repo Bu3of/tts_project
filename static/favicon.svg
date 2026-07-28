@@ -1,0 +1,5 @@
+<!-- The browser-tab icon. SVG works as a favicon in all modern browsers,
+     and unlike .ico files it's just text you can read and edit. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <text y="80" font-size="80">🔊</text>
+</svg>

@@ -1,0 +1,13 @@
+# The virtual environment — machine-specific, recreated with `python -m venv .venv`
+.venv/
+
+# Your secret API key lives in .env — this line keeps it out of git forever.
+# (.env.example, WITHOUT the real key, is the file that gets committed.)
+.env
+
+# Python's compiled-bytecode cache folders — auto-generated noise
+__pycache__/
+
+# Generated audio output — can be huge, and always regenerable
+*.wav
+*.mp3

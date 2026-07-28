@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Document to Speech</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      max-width: 36rem;
+      margin: 3rem auto;
+      padding: 0 1rem;
+    }
+    textarea {
+      width: 100%;
+      min-height: 10rem;
+      font: inherit;
+      padding: 0.75rem;
+      box-sizing: border-box;
+    }
+    button {
+      font: inherit;
+      padding: 0.6rem 1.5rem;
+      margin-top: 0.75rem;
+      cursor: pointer;
+    }
+    button:disabled { cursor: wait; opacity: 0.6; }
+    #status { color: #666; margin-top: 0.75rem; min-height: 1.2em; }
+    .hint { color: #888; font-size: 0.85rem; margin: 0.5rem 0; }
+    progress { width: 100%; margin-top: 0.75rem; }
+    audio { width: 100%; margin-top: 1rem; }
+    .player-extras {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 0.5rem;
+      font-size: 0.9rem;
+    }
+    select { font: inherit; }
+  </style>
+</head>
+<body>
+  <h1>Document to Speech</h1>
+  <p>
+    Upload a document or paste text, press Speak, and it's narrated in the
+    background — watch the progress bar, then listen.
+  </p>
+
+  <input type="file" id="file" accept=".txt,.pdf">
+  <p class="hint">…or paste text below:</p>
+
+  <textarea id="text" placeholder="Paste your text here…"></textarea>
+  <div id="count" class="hint"></div>
+  <br>
+  <button id="speak">Speak</button>
+  <p id="status"></p>
+  <progress id="progress" hidden></progress>
+
+  <!-- The player row appears once a conversion finishes. The <audio> element
+       itself provides play/pause/seek/volume; we add what it lacks: speed
+       control and a download link. -->
+  <div id="playerRow" hidden>
+    <audio id="player" controls></audio>
+    <div class="player-extras">
+      <label>
+        Speed
+        <select id="speed">
+          <option value="0.75">0.75×</option>
+          <option value="1" selected>1×</option>
+          <option value="1.25">1.25×</option>
+          <option value="1.5">1.5×</option>
+          <option value="1.75">1.75×</option>
+          <option value="2">2×</option>
+        </select>
+      </label>
+      <a id="download" download="narration.wav">Download audio</a>
+    </div>
+  </div>
+
+  <script>
+    // Grab the page elements once, by their id="" attributes above.
+    const textBox = document.getElementById("text");
+    const button = document.getElementById("speak");
+    const status = document.getElementById("status");
+    const player = document.getElementById("player");
+    const filePicker = document.getElementById("file");
+    const counter = document.getElementById("count");
+    const progress = document.getElementById("progress");
+    const playerRow = document.getElementById("playerRow");
+    const speed = document.getElementById("speed");
+    const download = document.getElementById("download");
+
+    // Playback speed: playbackRate is built into every <audio> element —
+    // browsers pitch-correct automatically, so 1.5× is faster, not squeaky.
+    speed.addEventListener("change", () => {
+      player.playbackRate = parseFloat(speed.value);
+    });
+    // Loading a new clip can reset the rate; reapply the choice each time.
+    player.addEventListener("loadedmetadata", () => {
+      player.playbackRate = parseFloat(speed.value);
+    });
+
+    // Live character count under the textarea (the cap is now 200,000).
+    function updateCount() {
+      const n = textBox.value.length;
+      counter.textContent = n === 0 ? "" : n.toLocaleString() + " characters"
+        + (n > 200000 ? " — over the 200,000 limit; trim before speaking" : "");
+    }
+    textBox.addEventListener("input", updateCount);
+
+    // When a file is chosen, send it to the server for extraction and put
+    // the cleaned text into the textarea for review before speaking.
+    filePicker.addEventListener("change", async () => {
+      const file = filePicker.files[0];
+      if (!file) return;
+
+      status.textContent = "Extracting text from " + file.name + "…";
+
+      // FormData is how browsers package file uploads — the same format a
+      // plain HTML <form> would send, built by hand.
+      const formData = new FormData();
+      formData.append("file", file);
+
+      try {
+        const response = await fetch("/api/extract", {
+          method: "POST",
+          body: formData,
+        });
+
+        if (!response.ok) {
+          const error = await response.json();
+          status.textContent = "Error: " + error.detail;
+          return;
+        }
+
+        const result = await response.json();
+        textBox.value = result.text;
+        updateCount();
+        status.textContent = "Loaded " + result.characters.toLocaleString()
+          + " characters from " + result.filename
+          + " — review the text, then press Speak.";
+      } catch (networkError) {
+        status.textContent = "Could not reach the server — is uvicorn running?";
+      }
+    });
+
+    // A tiny helper: "wait this many milliseconds" as an awaitable promise.
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    button.addEventListener("click", async () => {
+      const text = textBox.value.trim();
+      if (!text) {
+        status.textContent = "Paste some text first.";
+        return;
+      }
+
+      // Disable the button so an impatient double-click doesn't pay twice.
+      button.disabled = true;
+      playerRow.hidden = true;
+      status.textContent = "Starting the job…";
+
+      try {
+        // Step 1: hand the text over, get back a claim ticket (job id).
+        const response = await fetch("/api/jobs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: text }),
+        });
+
+        if (!response.ok) {
+          const error = await response.json();
+          status.textContent = "Error: " + error.detail;
+          return;
+        }
+
+        const { job_id, total_chunks } = await response.json();
+        progress.max = total_chunks;
+        progress.value = 0;
+        progress.hidden = false;
+
+        // Step 2: poll the ticket until the kitchen says it's ready.
+        while (true) {
+          await sleep(1500);
+          const job = await (await fetch("/api/jobs/" + job_id)).json();
+          progress.value = job.done_chunks;
+
+          if (job.status === "error") {
+            status.textContent = "Error: " + job.error;
+            return;
+          }
+          if (job.status === "done") break;
+
+          status.textContent = "Generating chunk "
+            + Math.min(job.done_chunks + 1, total_chunks) + " of " + total_chunks + "…"
+            + (job.done_chunks === 0
+               ? " (the first chunk can take a minute or two if the model is waking up)"
+               : "");
+        }
+
+        // Step 3: the finished WAV now lives on the server — point both the
+        // player and the download link at its URL.
+        const audioUrl = "/api/jobs/" + job_id + "/audio";
+        player.src = audioUrl;
+        download.href = audioUrl;
+        playerRow.hidden = false;
+        player.play();
+        status.textContent = "Done — " + total_chunks + " chunk"
+          + (total_chunks === 1 ? "" : "s") + " stitched together.";
+      } catch (networkError) {
+        status.textContent = "Could not reach the server — is uvicorn running?";
+      } finally {
+        // Runs whether we succeeded or failed: always re-enable the button.
+        button.disabled = false;
+        progress.hidden = true;
+      }
+    });
+  </script>
+</body>
+</html>

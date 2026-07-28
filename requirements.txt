@@ -1,0 +1,10 @@
+# Phase 1 dependencies only — more get added as phases progress.
+# Install with:  .venv\Scripts\python.exe -m pip install -r requirements.txt
+
+requests        # makes HTTP calls to the DeepInfra API
+python-dotenv   # loads the API key from the .env file
+num2words       # turns numbers into words ("1200" -> "one thousand two hundred") for normalize.py
+fastapi         # the web framework: routes, request validation
+uvicorn         # the server that runs the FastAPI app
+pypdf           # reads text out of PDF files, for extract.py
+python-multipart # lets FastAPI receive file uploads
