@@ -77,6 +77,11 @@ Then open `listen.html` in a browser and press play.
       served from disk even after the in-memory job board forgets)
 - [x] Skip ±15 s buttons — chunk-boundary-aware while a job is still
       generating (translates the target across per-chunk files)
+- [x] Read-along panel — shows the narrated text; the current sentence is
+      highlighted, finished sentences fade. Chunk position is exact
+      (server-measured timings in `audio/{job}.json`); the sentence within
+      a chunk is estimated by character-proportional timing, so it can
+      drift ±1 sentence on unusual text.
 
 ### Fast-follows worth doing next (not yet built)
 

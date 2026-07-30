@@ -16,6 +16,7 @@ then open http://127.0.0.1:8000.
 """
 
 import io
+import json
 import uuid
 import wave
 from concurrent.futures import ThreadPoolExecutor
@@ -183,6 +184,19 @@ def job_audio(job_id: str):
     return FileResponse(path, media_type="audio/wav")
 
 
+@app.get("/api/jobs/{job_id}/meta")
+def job_meta(job_id: str):
+    """Read-along data: each chunk's text with its exact start time and
+    duration, measured while stitching. Grows as the job progresses and,
+    like the audio, survives server restarts (it's a file on disk)."""
+    if not job_id.isalnum():
+        raise HTTPException(status_code=404, detail="Unknown job.")
+    path = AUDIO_DIR / f"{job_id}.json"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="No read-along data for this conversion.")
+    return FileResponse(path, media_type="application/json")
+
+
 @app.get("/api/jobs/{job_id}/chunks/{index}")
 def job_chunk(job_id: str, index: int):
     """One chunk's audio, available as soon as THAT chunk is synthesized —
@@ -210,6 +224,9 @@ def _run_job(job_id, chunks, voice):
     chunk_dir = AUDIO_DIR / job_id       # per-chunk files live in here
     chunk_dir.mkdir(exist_ok=True)
     output_path = AUDIO_DIR / f"{job_id}.wav"
+    meta_path = AUDIO_DIR / f"{job_id}.json"
+    meta = []                # read-along data: text + timing per chunk
+    start_seconds = 0.0
     output = None
     try:
         with ThreadPoolExecutor(max_workers=MAX_PARALLEL_REQUESTS) as pool:
@@ -230,7 +247,20 @@ def _run_job(job_id, chunks, voice):
                     if output is None:
                         output = wave.open(str(output_path), "wb")
                         output.setparams(w.getparams())
+                    duration = w.getnframes() / w.getframerate()
                     output.writeframes(w.readframes(w.getnframes()))
+
+                # Record exactly when this chunk starts and how long it lasts
+                # — the read-along panel is driven by these numbers. Written
+                # BEFORE done_chunks ticks up, so the data is always there
+                # by the time the browser hears the chunk is ready.
+                meta.append({
+                    "text": chunks[i],
+                    "start": round(start_seconds, 3),
+                    "duration": round(duration, 3),
+                })
+                start_seconds += duration
+                meta_path.write_text(json.dumps(meta), encoding="utf-8")
 
                 job["done_chunks"] = i + 1
         job["status"] = "done"

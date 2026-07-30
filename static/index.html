@@ -44,6 +44,25 @@
     }
     .transport { display: flex; gap: 0.5rem; align-items: center; }
     .transport button { padding: 0.3rem 0.7rem; }
+    #readAlong { margin-top: 1rem; }
+    .panel-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 0.25rem;
+    }
+    .panel-head button { padding: 0.2rem 0.6rem; font-size: 0.85rem; }
+    #panelText {
+      max-height: 22rem;
+      overflow-y: auto;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      padding: 0.75rem 1rem;
+      line-height: 1.7;
+    }
+    #panelText p { margin: 0.4rem 0; }
+    .sent.read { color: #b5b5b5; }
+    .sent.current { background: #ffe9a8; border-radius: 3px; }
     select { font: inherit; }
     #resumeBox {
       border: 1px solid #ddd;
@@ -121,6 +140,16 @@
       </div>
       <a id="download" download="narration.wav" hidden>Download audio</a>
     </div>
+  </div>
+
+  <!-- Read-along: the narrator's script, following the voice. Already-read
+       sentences fade, the current one is highlighted. -->
+  <div id="readAlong" hidden>
+    <div class="panel-head">
+      <span class="hint">Follow along (shows the narrated text — numbers spelled out)</span>
+      <button id="togglePanel">Hide</button>
+    </div>
+    <div id="panelText"></div>
   </div>
 
   <script>
@@ -220,6 +249,112 @@
     document.getElementById("back15").addEventListener("click", () => skip(-15));
     document.getElementById("fwd15").addEventListener("click", () => skip(15));
 
+    // ---- read-along panel ------------------------------------------------
+    const readAlong = document.getElementById("readAlong");
+    const panelText = document.getElementById("panelText");
+    const togglePanel = document.getElementById("togglePanel");
+
+    let meta = [];            // [{text, start, duration}] from the server
+    let sentSpans = [];       // every sentence <span>, in document order
+    let chunkSentences = [];  // per chunk: { spans: [{el, chars}], totalChars }
+    let lastMark = -1;        // flat index of the highlighted sentence
+
+    togglePanel.addEventListener("click", () => {
+      panelText.hidden = !panelText.hidden;
+      togglePanel.textContent = panelText.hidden ? "Show" : "Hide";
+    });
+
+    const splitSentences = (t) =>
+      t.split(/(?<=[.!?…]["'”’]?)\s+/).filter((s) => s.length > 0);
+
+    function resetPanel() {
+      panelText.innerHTML = "";
+      meta = [];
+      sentSpans = [];
+      chunkSentences = [];
+      lastMark = -1;
+      readAlong.hidden = true;
+    }
+
+    // Add any chunks the server has produced since we last rendered.
+    function renderMeta(newMeta) {
+      for (let c = chunkSentences.length; c < newMeta.length; c++) {
+        const chunkDiv = document.createElement("div");
+        const entry = { spans: [], totalChars: 0 };
+        for (const paraText of newMeta[c].text.split("\n\n")) {
+          const p = document.createElement("p");
+          for (const sentence of splitSentences(paraText)) {
+            const span = document.createElement("span");
+            span.className = "sent unread";
+            span.textContent = sentence + " ";
+            p.appendChild(span);
+            entry.spans.push({ el: span, chars: sentence.length });
+            entry.totalChars += sentence.length;
+            sentSpans.push(span);
+          }
+          chunkDiv.appendChild(p);
+        }
+        chunkSentences.push(entry);
+        panelText.appendChild(chunkDiv);
+      }
+      meta = newMeta;
+      readAlong.hidden = false;
+    }
+
+    async function fetchMeta(jobId) {
+      try {
+        const r = await fetch("/api/jobs/" + jobId + "/meta");
+        if (r.ok) renderMeta(await r.json());
+      } catch (e) { /* panel is a nice-to-have; never break playback over it */ }
+    }
+
+    function flatIndexOf(c, s) {
+      let idx = 0;
+      for (let k = 0; k < c; k++) idx += chunkSentences[k].spans.length;
+      return idx + s;
+    }
+
+    // Which sentence is the voice on right now? The chunk is known exactly
+    // (server-measured timings); the sentence within it is ESTIMATED by
+    // assuming characters are spoken at a steady rate — close, not perfect.
+    function updateHighlight() {
+      if (!meta.length || !currentJob) return;
+
+      let c, within;
+      if (mode === "chunks") {
+        c = chunkIndex;
+        within = player.currentTime;
+      } else {
+        const pos = player.currentTime;
+        c = 0;
+        while (c + 1 < meta.length && pos >= meta[c].start + meta[c].duration) c += 1;
+        within = pos - meta[c].start;
+      }
+      if (c >= chunkSentences.length) return;
+
+      const entry = chunkSentences[c];
+      const duration = meta[c].duration || player.duration || 1;
+      const fraction = Math.min(Math.max(within / duration, 0), 0.999);
+      const charTarget = fraction * entry.totalChars;
+
+      let s = 0, seen = 0;
+      while (s < entry.spans.length - 1 && seen + entry.spans[s].chars < charTarget) {
+        seen += entry.spans[s].chars;
+        s += 1;
+      }
+
+      const mark = flatIndexOf(c, s);
+      if (mark === lastMark) return;   // nothing moved — don't touch the DOM
+      lastMark = mark;
+      sentSpans.forEach((el, i) => {
+        el.className = "sent " + (i < mark ? "read" : i === mark ? "current" : "unread");
+      });
+      if (!panelText.hidden) {
+        entry.spans[s].el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      }
+    }
+    player.addEventListener("timeupdate", updateHighlight);
+
     function playChunk(i) {
       player.src = `/api/jobs/${currentJob.id}/chunks/${i}`;
       player.play();
@@ -280,6 +415,8 @@
       currentJob = { id: saved.jobId, title: saved.title, total: 0 };
       mode = "full";
       jobDone = true;
+      resetPanel();
+      fetchMeta(saved.jobId);   // rebuild the read-along panel if data exists
       pendingSeek = saved.seconds;
       player.src = `/api/jobs/${saved.jobId}/audio`;
       download.href = `/api/jobs/${saved.jobId}/audio`;
@@ -365,6 +502,7 @@
         jobDone = false;
         waitingForChunk = false;
         chunkDurations = [];
+        resetPanel();
 
         progress.max = total_chunks;
         progress.value = 0;
@@ -375,6 +513,11 @@
           const job = await (await fetch("/api/jobs/" + job_id)).json();
           readyChunks = job.done_chunks;
           progress.value = job.done_chunks;
+
+          // Pick up any newly generated chunks' text + timings for the panel.
+          if (readyChunks > chunkSentences.length) {
+            await fetchMeta(job_id);
+          }
 
           if (job.status === "error") {
             status.textContent = "Error: " + job.error;
