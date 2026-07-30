@@ -14,3 +14,6 @@ __pycache__/
 
 # Conversion artifacts: per-job WAVs, chunk folders, and timing JSONs
 audio/
+
+# Unrelated file that lives in this folder (an ML chart from another project)
+output.png
