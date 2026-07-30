@@ -11,3 +11,6 @@ __pycache__/
 # Generated audio output — can be huge, and always regenerable
 *.wav
 *.mp3
+
+# Conversion artifacts: per-job WAVs, chunk folders, and timing JSONs
+audio/
