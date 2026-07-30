@@ -138,6 +138,12 @@ def create_job(request: JobRequest, background: BackgroundTasks):
     # Normalize BEFORE chunking, so things like "£3,000" can't be sliced in
     # half by a chunk boundary, and the budget measures what will be spoken.
     chunks = split_into_chunks(normalize(text))
+    if not chunks:
+        raise HTTPException(
+            status_code=400,
+            detail="After cleaning, no speakable text remained (an English "
+                   "voice can't read this content).",
+        )
 
     # Locate each chapter heading inside the chunks so the player can offer
     # jump-to-chapter. Headings are normalized the same way the text was —

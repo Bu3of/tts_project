@@ -320,6 +320,40 @@
     const splitSentences = (t) =>
       t.split(/(?<=[.!?…]["'”’]?)\s+/).filter((s) => s.length > 0);
 
+    // Time estimates weight sentences by characters the voice actually
+    // SPEAKS (letters/digits). CJK, brackets, dashes and other decoration
+    // take almost no audio time — counting them made the highlight lag
+    // behind the voice through front matter and never light up unspoken
+    // lines. Floor of 1 so nothing divides by zero.
+    const speakableChars = (t) =>
+      Math.max(1, (t.match(/[a-zA-Z0-9]/g) || []).length);
+
+    // The voice also PAUSES: briefly after each sentence, longer at
+    // paragraph ends. At Kokoro's ~15 chars/second speaking rate those
+    // silences are worth roughly this many characters of time. Without
+    // this "pause tax", runs of short lines (title pages!) cost almost
+    // nothing on paper and the highlight sprints ahead of the voice.
+    const SENTENCE_PAUSE = 5;    // ≈ a third of a second
+    const PARAGRAPH_PAUSE = 7;   // extra, on a paragraph's last sentence
+
+    function sentenceWeight(sentence, isLastInParagraph) {
+      return speakableChars(sentence) + SENTENCE_PAUSE
+        + (isLastInParagraph ? PARAGRAPH_PAUSE : 0);
+    }
+
+    // The same weighting applied to a whole text — used to map a chapter's
+    // character offset to time with identical assumptions.
+    function weightText(t) {
+      let total = 0;
+      for (const para of t.split("\n\n")) {
+        const ss = splitSentences(para);
+        ss.forEach((s, i) => {
+          total += sentenceWeight(s, i === ss.length - 1);
+        });
+      }
+      return Math.max(1, total);
+    }
+
     function resetPanel() {
       panelText.innerHTML = "";
       meta = [];
@@ -340,25 +374,27 @@
         const chunkIdx = c;
         for (const paraText of newMeta[c].text.split("\n\n")) {
           const p = document.createElement("p");
-          for (const sentence of splitSentences(paraText)) {
+          const sentences = splitSentences(paraText);
+          sentences.forEach((sentence, si) => {
             const span = document.createElement("span");
             span.className = "sent unread";
             span.textContent = sentence + " ";
             // Click a sentence -> jump the audio there. This is the
-            // highlight estimate run in reverse: characters before the
-            // sentence, as a fraction of the chunk, become seconds.
-            const charsBefore = entry.totalChars;
+            // highlight estimate run in reverse: weighted time before the
+            // sentence, as a fraction of the chunk, becomes seconds.
+            const weightBefore = entry.totalChars;
             span.addEventListener("click", () => {
               const m = meta[chunkIdx];
               if (!m) return;
               seekToTime(m.start
-                + (charsBefore / Math.max(entry.totalChars, 1)) * m.duration);
+                + (weightBefore / Math.max(entry.totalChars, 1)) * m.duration);
             });
             p.appendChild(span);
-            entry.spans.push({ el: span, chars: sentence.length });
-            entry.totalChars += sentence.length;
+            const weight = sentenceWeight(sentence, si === sentences.length - 1);
+            entry.spans.push({ el: span, chars: weight });
+            entry.totalChars += weight;
             sentSpans.push(span);
-          }
+          });
           chunkDiv.appendChild(p);
         }
         chunkSentences.push(entry);
@@ -390,9 +426,11 @@
       if (!chapter) return;
       const m = meta[chapter.chunk];
       if (!m) return;
-      // The chapter's character offset inside its chunk, as time.
+      // The chapter's offset inside its chunk, as time — using the same
+      // pause-aware weighting as the highlighting.
       seekToTime(m.start
-        + (chapter.offset / Math.max(m.text.length, 1)) * m.duration);
+        + (weightText(m.text.slice(0, chapter.offset))
+           / weightText(m.text)) * m.duration);
     });
 
     async function fetchMeta(jobId) {

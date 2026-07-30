@@ -80,6 +80,20 @@ def _comma_number(match):
 
 # --- the pipeline -----------------------------------------------------------
 
+# Characters an English Kokoro voice can't read: CJK ideographs, kana,
+# Hangul, and their punctuation/fullwidth forms. Left in, DeepInfra's
+# Kokoro does NOT skip them — it says the words "chinese letter" for each
+# one (measured 2026-07-30, really). Stripping them fixes both the
+# narration and the read-along highlight, which assumes text maps to speech.
+_UNSPEAKABLE = re.compile(
+    "[　-〿"    # CJK punctuation
+    "぀-ヿ"     # hiragana + katakana
+    "㐀-䶿"     # CJK extension A
+    "一-鿿"     # CJK unified ideographs
+    "가-힯"     # Hangul syllables
+    "＀-￯]"    # fullwidth forms
+)
+
 # (pattern, rewrite function) pairs, applied top to bottom.
 RULES = [
     (re.compile(r"([£$€])\s?(\d[\d,]*(?:\.\d+)?)"), _currency),
@@ -92,6 +106,7 @@ RULES = [
 
 def normalize(text):
     """Rewrite notation into narrator-friendly words."""
+    text = _UNSPEAKABLE.sub("", text)
     for pattern, rewrite in RULES:
         text = pattern.sub(rewrite, text)
     # Collapse any doubled-up spaces the rewrites may have left behind.
