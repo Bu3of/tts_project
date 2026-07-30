@@ -13,6 +13,7 @@ aloud and every line break becomes a weird pause. So after extraction we
 stitch lines back into paragraphs before anyone hears them.
 """
 
+import html
 import io
 import os
 import re
@@ -29,15 +30,18 @@ class ExtractionError(Exception):
 
 
 def extract_text(filename, data):
-    """Take an uploaded file's name and raw bytes; return clean text."""
+    """Take an uploaded file's name and raw bytes; return (clean text,
+    list of chapter headings). Headings only exist for EPUBs — PDFs and
+    plain text have no reliable way to mark them."""
     name = (filename or "").lower()
 
     if name.endswith(".txt"):
-        return _tidy(_from_txt(data))
+        return _tidy(_from_txt(data)), []
     if name.endswith(".pdf"):
-        return _tidy(_from_pdf(data))
+        return _tidy(_from_pdf(data)), []
     if name.endswith(".epub"):
-        return _tidy(_from_epub(data))
+        text, headings = _from_epub(data)
+        return _tidy(text), headings
 
     raise ExtractionError("Only .txt, .pdf, and .epub files are supported.")
 
@@ -98,6 +102,8 @@ def _from_epub(data):
         os.unlink(temp_path)
 
     paragraphs = []
+    headings = []            # chapter/section titles, in reading order
+    first_blocks = []        # first paragraph of each document (see below)
     # The "spine" is the book's reading order. Each entry names a chapter.
     for item_id, _linear in book.spine:
         item = book.get_item_with_id(item_id)
@@ -111,18 +117,46 @@ def _from_epub(data):
         blocks = soup.find_all(["p", "h1", "h2", "h3", "h4", "h5", "h6",
                                 "li", "blockquote"])
         if blocks:
-            paragraphs.extend(b.get_text(" ", strip=True) for b in blocks)
+            first_in_doc = None
+            for block in blocks:
+                # unescape: sloppy conversions leave double-escaped entities
+                # ("&quot;") that would otherwise be narrated letter by letter.
+                block_text = html.unescape(block.get_text(" ", strip=True))
+                paragraphs.append(block_text)
+                if block_text and first_in_doc is None:
+                    first_in_doc = block_text
+                # Top-level headings become chapter markers for navigation.
+                if block.name in ("h1", "h2", "h3") and block_text:
+                    headings.append(block_text)
+            if first_in_doc:
+                first_blocks.append(first_in_doc)
         else:
             # Some books mark paragraphs unusually (bare <div>s) — fall
             # back to grabbing all the chapter's text, one line per element.
             paragraphs.extend(
-                line.strip() for line in soup.get_text("\n").splitlines()
+                html.unescape(line.strip())
+                for line in soup.get_text("\n").splitlines()
             )
+
+    # Calibre-converted books often have NO heading tags at all — each
+    # chapter is its own document whose first paragraph is the title
+    # ("Chapter 401 Divine Epiphany"). If the book yielded zero real
+    # headings, accept those first paragraphs as chapters when they look
+    # the part: short, and starting like a title. The pattern check stops
+    # cover-page fragments from becoming phantom chapters.
+    if not headings:
+        title_like = re.compile(
+            r"^(chapter|prologue|epilogue|interlude|part|book|act|volume|"
+            r"appendix|afterword|foreword)\b|^\d+[\s.:—-]",
+            re.IGNORECASE,
+        )
+        headings = [t for t in first_blocks
+                    if len(t) <= 80 and title_like.match(t)]
 
     text = "\n\n".join(p for p in paragraphs if p)
     if not text.strip():
         raise ExtractionError("No readable text found in this EPUB.")
-    return text
+    return text, headings
 
 
 def _tidy(text):

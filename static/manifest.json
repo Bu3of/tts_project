@@ -1,0 +1,17 @@
+{
+  "name": "Document to Speech",
+  "short_name": "Doc2Speech",
+  "description": "Turn documents into narration you can listen to.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#ffffff",
+  "icons": [
+    {
+      "src": "/static/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

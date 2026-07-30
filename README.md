@@ -82,6 +82,14 @@ Then open `listen.html` in a browser and press play.
       (server-measured timings in `audio/{job}.json`); the sentence within
       a chunk is estimated by character-proportional timing, so it can
       drift ±1 sentence on unusual text.
+- [x] Click-to-jump — click any sentence in the panel to seek there
+- [x] Chapter navigation — EPUB headings become a jump-to-chapter dropdown
+      (headings are matched inside the normalized chunks server-side)
+- [x] Time-remaining estimate while generating
+- [x] Sleep timer (15/30/60 min)
+- [x] Media Session — lock-screen/media-key play/pause/skip where the
+      browser allows it (some need HTTPS)
+- [x] PWA manifest — "Add to Home Screen" gives an app-like launch
 
 ### Fast-follows worth doing next (not yet built)
 
@@ -91,11 +99,28 @@ Then open `listen.html` in a browser and press play.
 - Warm-up ping to hide the cold start; longer-term, self-host Kokoro
   (kills cold starts, the ~real-time synthesis ceiling, and per-char costs)
 
-### Run the web app (Phase 2)
+### Run the web app
 
 ```powershell
 .venv\Scripts\python.exe -m uvicorn app:app --reload
 ```
+
+### Listen from your phone (same Wi-Fi)
+
+```powershell
+.venv\Scripts\python.exe -m uvicorn app:app --host 0.0.0.0
+```
+
+- `--host 0.0.0.0` means "accept connections from other devices", not just
+  this laptop. The first time, Windows Firewall will ask — allow Python on
+  **private** networks.
+- Find the laptop's address with `ipconfig` (the "IPv4 Address" of your
+  Wi-Fi adapter, e.g. 192.168.1.23), then open `http://192.168.1.23:8000`
+  on the phone.
+- Phone-browser caveats: playback may need one tap on the player (mobile
+  autoplay rules), and some browsers only enable lock-screen controls /
+  "install as app" on HTTPS pages — those get properly solved by the
+  eventual real deployment or Capacitor wrap, not worth fighting now.
 
 Then open <http://127.0.0.1:8000>, paste text (≤3,000 chars for now), press
 **Speak**. Key files: `app.py` (routes), `tts.py` (the only file that knows

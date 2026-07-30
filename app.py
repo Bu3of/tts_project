@@ -90,11 +90,16 @@ async def extract(file: UploadFile = File(...)):
         )
 
     try:
-        text = extract_text(file.filename, data)
+        text, headings = extract_text(file.filename, data)
     except ExtractionError as error:
         raise HTTPException(status_code=400, detail=str(error))
 
-    return {"filename": file.filename, "characters": len(text), "text": text}
+    return {
+        "filename": file.filename,
+        "characters": len(text),
+        "text": text,
+        "headings": headings[:200],   # chapter titles (EPUB only), for navigation
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +118,7 @@ ALLOWED_VOICES = {
 class JobRequest(BaseModel):
     text: str
     voice: str = "af_heart"
+    headings: list[str] = []   # chapter titles from extraction, if any
 
 
 @app.post("/api/jobs")
@@ -133,6 +139,28 @@ def create_job(request: JobRequest, background: BackgroundTasks):
     # half by a chunk boundary, and the budget measures what will be spoken.
     chunks = split_into_chunks(normalize(text))
 
+    # Locate each chapter heading inside the chunks so the player can offer
+    # jump-to-chapter. Headings are normalized the same way the text was —
+    # otherwise "Chapter 3" would never match its spoken form "Chapter three".
+    # A heading that isn't found (edited out, or an EPUB oddity) is dropped.
+    chapters = []
+    for title in request.headings[:200]:
+        key = normalize(title).strip()[:60]
+        if not key:
+            continue
+        for index, chunk in enumerate(chunks):
+            offset = chunk.find(key)
+            if offset != -1:
+                if chapters and chapters[-1]["chunk"] == index \
+                        and chapters[-1]["offset"] == offset:
+                    break   # duplicate heading pointing at the same spot
+                chapters.append({
+                    "title": title.strip()[:80],
+                    "chunk": index,
+                    "offset": offset,   # character position inside the chunk
+                })
+                break
+
     job_id = uuid.uuid4().hex[:12]   # e.g. "b3f2a91c04d7" — random and unguessable
     JOBS[job_id] = {
         "status": "processing",      # -> "done" or "error"
@@ -143,7 +171,7 @@ def create_job(request: JobRequest, background: BackgroundTasks):
 
     # add_task means: send the response NOW, run _run_job right after.
     # The browser gets its claim ticket immediately and polls while we work.
-    background.add_task(_run_job, job_id, chunks, request.voice)
+    background.add_task(_run_job, job_id, chunks, request.voice, chapters)
     return {"job_id": job_id, "total_chunks": len(chunks)}
 
 
@@ -216,7 +244,7 @@ def job_chunk(job_id: str, index: int):
 MAX_PARALLEL_REQUESTS = 4
 
 
-def _run_job(job_id, chunks, voice):
+def _run_job(job_id, chunks, voice, chapters):
     """The background worker: synthesize chunks (several at a time), save
     each one as its own file for progressive playback, append it to the
     stitched WAV, and keep the job board updated for the poll route."""
@@ -260,7 +288,10 @@ def _run_job(job_id, chunks, voice):
                     "duration": round(duration, 3),
                 })
                 start_seconds += duration
-                meta_path.write_text(json.dumps(meta), encoding="utf-8")
+                meta_path.write_text(
+                    json.dumps({"chunks": meta, "chapters": chapters}),
+                    encoding="utf-8",
+                )
 
                 job["done_chunks"] = i + 1
         job["status"] = "done"

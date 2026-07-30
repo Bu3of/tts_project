@@ -5,6 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Document to Speech</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <!-- The manifest is what lets phones "Add to Home Screen" as an app. -->
+  <link rel="manifest" href="/static/manifest.json">
+  <meta name="theme-color" content="#ffffff">
   <style>
     body {
       font-family: system-ui, sans-serif;
@@ -61,8 +64,11 @@
       line-height: 1.7;
     }
     #panelText p { margin: 0.4rem 0; }
+    .sent { cursor: pointer; }
+    .sent:hover { outline: 1px dotted #bbb; }
     .sent.read { color: #b5b5b5; }
     .sent.current { background: #ffe9a8; border-radius: 3px; }
+    #chapters { max-width: 45%; }
     select { font: inherit; }
     #resumeBox {
       border: 1px solid #ddd;
@@ -137,6 +143,16 @@
             <option value="2">2×</option>
           </select>
         </label>
+        <label>
+          Sleep
+          <select id="sleep">
+            <option value="0" selected>off</option>
+            <option value="10">10 s (test)</option>
+            <option value="900">15 min</option>
+            <option value="1800">30 min</option>
+            <option value="3600">60 min</option>
+          </select>
+        </label>
       </div>
       <a id="download" download="narration.wav" hidden>Download audio</a>
     </div>
@@ -146,7 +162,8 @@
        sentences fade, the current one is highlighted. -->
   <div id="readAlong" hidden>
     <div class="panel-head">
-      <span class="hint">Follow along (shows the narrated text — numbers spelled out)</span>
+      <select id="chapters" hidden></select>
+      <span class="hint">Follow along — click any sentence to jump there</span>
       <button id="togglePanel">Hide</button>
     </div>
     <div id="panelText"></div>
@@ -227,14 +244,14 @@
       if (target < 0 && chunkIndex > 0) {
         // Lands in the previous chunk (whose duration we know — we played it).
         chunkIndex -= 1;
-        playedSeconds = cumBefore(chunkIndex);
-        pendingSeek = Math.max(0, (chunkDurations[chunkIndex] || 0) + target);
+        playedSeconds = startOf(chunkIndex);
+        pendingSeek = Math.max(0, durOf(chunkIndex) + target);
         playChunk(chunkIndex);
       } else if (player.duration && target > player.duration) {
         // Lands in the next chunk — if it's been generated yet.
         if (chunkIndex + 1 < readyChunks) {
           chunkIndex += 1;
-          playedSeconds = cumBefore(chunkIndex);
+          playedSeconds = startOf(chunkIndex);
           pendingSeek = target - player.duration;
           playChunk(chunkIndex);
         } else {
@@ -253,11 +270,47 @@
     const readAlong = document.getElementById("readAlong");
     const panelText = document.getElementById("panelText");
     const togglePanel = document.getElementById("togglePanel");
+    const chaptersSel = document.getElementById("chapters");
 
     let meta = [];            // [{text, start, duration}] from the server
+    let chaptersData = [];    // [{title, chunk, offset}] from the server
     let sentSpans = [];       // every sentence <span>, in document order
     let chunkSentences = [];  // per chunk: { spans: [{el, chars}], totalChars }
     let lastMark = -1;        // flat index of the highlighted sentence
+
+    // Prefer the server's exact timings when we have them; fall back to
+    // the durations measured client-side as chunks loaded.
+    function startOf(c) { return meta[c] !== undefined ? meta[c].start : cumBefore(c); }
+    function durOf(c) { return meta[c] !== undefined ? meta[c].duration : (chunkDurations[c] || 0); }
+
+    // Which chunk does a moment on the overall timeline fall in?
+    function metaChunkAt(t) {
+      let c = 0;
+      while (c + 1 < meta.length && t >= meta[c].start + meta[c].duration) c += 1;
+      return c;
+    }
+
+    // Jump to an absolute time — the shared engine behind clicking a
+    // sentence and picking a chapter. Handles both playback modes.
+    function seekToTime(t) {
+      if (!currentJob) return;
+      if (mode === "full") {
+        pendingSeek = null;
+        player.currentTime = t;
+        player.play();
+        return;
+      }
+      const c = metaChunkAt(t);
+      if (c >= readyChunks) {
+        status.textContent = "That part hasn't been generated yet — it's still on its way.";
+        return;
+      }
+      chunkIndex = c;
+      playedSeconds = startOf(c);
+      waitingForChunk = false;
+      pendingSeek = Math.max(0, t - startOf(c));
+      playChunk(c);
+    }
 
     togglePanel.addEventListener("click", () => {
       panelText.hidden = !panelText.hidden;
@@ -270,10 +323,13 @@
     function resetPanel() {
       panelText.innerHTML = "";
       meta = [];
+      chaptersData = [];
       sentSpans = [];
       chunkSentences = [];
       lastMark = -1;
       readAlong.hidden = true;
+      chaptersSel.hidden = true;
+      chaptersSel.innerHTML = "";
     }
 
     // Add any chunks the server has produced since we last rendered.
@@ -281,12 +337,23 @@
       for (let c = chunkSentences.length; c < newMeta.length; c++) {
         const chunkDiv = document.createElement("div");
         const entry = { spans: [], totalChars: 0 };
+        const chunkIdx = c;
         for (const paraText of newMeta[c].text.split("\n\n")) {
           const p = document.createElement("p");
           for (const sentence of splitSentences(paraText)) {
             const span = document.createElement("span");
             span.className = "sent unread";
             span.textContent = sentence + " ";
+            // Click a sentence -> jump the audio there. This is the
+            // highlight estimate run in reverse: characters before the
+            // sentence, as a fraction of the chunk, become seconds.
+            const charsBefore = entry.totalChars;
+            span.addEventListener("click", () => {
+              const m = meta[chunkIdx];
+              if (!m) return;
+              seekToTime(m.start
+                + (charsBefore / Math.max(entry.totalChars, 1)) * m.duration);
+            });
             p.appendChild(span);
             entry.spans.push({ el: span, chars: sentence.length });
             entry.totalChars += sentence.length;
@@ -301,10 +368,42 @@
       readAlong.hidden = false;
     }
 
+    // Offer the chapter list once (it doesn't change during a job).
+    function renderChapters() {
+      if (!chaptersData.length || chaptersSel.options.length) return;
+      const placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = "Chapters…";
+      chaptersSel.appendChild(placeholder);
+      chaptersData.forEach((chapter, i) => {
+        const option = document.createElement("option");
+        option.value = String(i);
+        option.textContent = chapter.title;
+        chaptersSel.appendChild(option);
+      });
+      chaptersSel.hidden = false;
+    }
+
+    chaptersSel.addEventListener("change", () => {
+      const chapter = chaptersData[Number(chaptersSel.value)];
+      chaptersSel.value = "";   // snap back to the placeholder
+      if (!chapter) return;
+      const m = meta[chapter.chunk];
+      if (!m) return;
+      // The chapter's character offset inside its chunk, as time.
+      seekToTime(m.start
+        + (chapter.offset / Math.max(m.text.length, 1)) * m.duration);
+    });
+
     async function fetchMeta(jobId) {
       try {
         const r = await fetch("/api/jobs/" + jobId + "/meta");
-        if (r.ok) renderMeta(await r.json());
+        if (!r.ok) return;
+        const data = await r.json();
+        // Older conversions stored a bare list; newer ones an object.
+        renderMeta(Array.isArray(data) ? data : (data.chunks || []));
+        chaptersData = Array.isArray(data) ? [] : (data.chapters || []);
+        renderChapters();
       } catch (e) { /* panel is a nice-to-have; never break playback over it */ }
     }
 
@@ -355,6 +454,47 @@
     }
     player.addEventListener("timeupdate", updateHighlight);
 
+    // ---- sleep timer -----------------------------------------------------
+    const sleepSel = document.getElementById("sleep");
+    let sleepTimeout = null;
+    sleepSel.addEventListener("change", () => {
+      if (sleepTimeout) {
+        clearTimeout(sleepTimeout);
+        sleepTimeout = null;
+      }
+      const seconds = parseInt(sleepSel.value, 10);
+      const label = seconds < 60 ? seconds + " seconds"
+                                 : (seconds / 60) + " minutes";
+      if (seconds > 0) {
+        sleepTimeout = setTimeout(() => {
+          player.pause();   // position is already saved for resume
+          status.textContent = "Sleep timer: paused after " + label + ". Sweet dreams.";
+          sleepSel.value = "0";
+          sleepTimeout = null;
+        }, seconds * 1000);
+        status.textContent = "Sleep timer set for " + label + ".";
+      } else {
+        status.textContent = "Sleep timer off.";
+      }
+    });
+
+    // ---- lock-screen / media-key controls (Media Session API) -----------
+    // Lets the phone's lock screen and keyboard media keys drive playback.
+    // Guarded: not every browser exposes it (and some only on secure pages).
+    function setupMediaSession() {
+      if (!("mediaSession" in navigator)) return;
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: currentJob ? currentJob.title : "Document to Speech",
+        artist: "Document to Speech",
+      });
+    }
+    if ("mediaSession" in navigator) {
+      navigator.mediaSession.setActionHandler("play", () => player.play());
+      navigator.mediaSession.setActionHandler("pause", () => player.pause());
+      navigator.mediaSession.setActionHandler("seekbackward", () => skip(-15));
+      navigator.mediaSession.setActionHandler("seekforward", () => skip(15));
+    }
+
     function playChunk(i) {
       player.src = `/api/jobs/${currentJob.id}/chunks/${i}`;
       player.play();
@@ -377,7 +517,7 @@
         return;
       }
       chunkIndex += 1;
-      playedSeconds = cumBefore(chunkIndex);
+      playedSeconds = startOf(chunkIndex);
       if (jobDone) {
         switchToFull(playedSeconds);
       } else if (chunkIndex < readyChunks) {
@@ -417,6 +557,7 @@
       jobDone = true;
       resetPanel();
       fetchMeta(saved.jobId);   // rebuild the read-along panel if data exists
+      setupMediaSession();
       pendingSeek = saved.seconds;
       player.src = `/api/jobs/${saved.jobId}/audio`;
       download.href = `/api/jobs/${saved.jobId}/audio`;
@@ -445,6 +586,8 @@
     textBox.addEventListener("input", updateCount);
 
     // ---- file upload → extraction ----------------------------------------
+    let lastHeadings = [];   // chapter titles from the last extraction
+
     filePicker.addEventListener("change", async () => {
       const file = filePicker.files[0];
       if (!file) return;
@@ -458,10 +601,14 @@
           return;
         }
         const result = await response.json();
+        lastHeadings = result.headings || [];
         textBox.value = result.text;
         updateCount();
         status.textContent = "Loaded " + result.characters.toLocaleString()
           + " characters from " + result.filename
+          + (lastHeadings.length
+             ? " (" + lastHeadings.length + " chapters detected)"
+             : "")
           + " — review the text, then press Speak.";
       } catch (networkError) {
         status.textContent = "Could not reach the server — is uvicorn running?";
@@ -486,7 +633,7 @@
         const response = await fetch("/api/jobs", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: text, voice: voice.value }),
+          body: JSON.stringify({ text: text, voice: voice.value, headings: lastHeadings }),
         });
         if (!response.ok) {
           status.textContent = "Error: " + (await response.json()).detail;
@@ -503,16 +650,31 @@
         waitingForChunk = false;
         chunkDurations = [];
         resetPanel();
+        setupMediaSession();
 
         progress.max = total_chunks;
         progress.value = 0;
         progress.hidden = false;
+
+        // For the time-remaining estimate: note when chunks started landing
+        // and how many, then extrapolate the observed pace.
+        let etaBase = null;
+        const etaText = (done) => {
+          if (!etaBase || done <= etaBase.done || done >= total_chunks) return "";
+          const perChunk = (Date.now() - etaBase.time) / 1000 / (done - etaBase.done);
+          const left = perChunk * (total_chunks - done);
+          return left < 90 ? " — under 2 min left"
+                           : " — about " + Math.round(left / 60) + " min left";
+        };
 
         let started = false;
         while (true) {
           const job = await (await fetch("/api/jobs/" + job_id)).json();
           readyChunks = job.done_chunks;
           progress.value = job.done_chunks;
+          if (readyChunks > 0 && !etaBase) {
+            etaBase = { time: Date.now(), done: readyChunks };
+          }
 
           // Pick up any newly generated chunks' text + timings for the panel.
           if (readyChunks > chunkSentences.length) {
@@ -542,7 +704,7 @@
             + Math.min(job.done_chunks + 1, total_chunks) + " of " + total_chunks + "…"
             + (job.done_chunks === 0
                ? " (the first chunk can take a minute or two if the model is waking up)"
-               : "");
+               : etaText(job.done_chunks));
           await sleep(1500);
         }
 
