@@ -91,6 +91,20 @@ Then open `listen.html` in a browser and press play.
       browser allows it (some need HTTPS)
 - [x] PWA manifest — "Add to Home Screen" gives an app-like launch
 
+### Business-model decisions (2026-07-30 — context for later, not build tasks)
+
+- **No "unlimited" tier.** Explicit generous caps instead — honest, bounds
+  liability, and protects against the main abuse case: mass-producing
+  audiobooks for redistribution.
+- **Premium cap: monthly ceiling ~120 h of audio** (optionally + 24 h/day
+  burst cap). Math at DeepInfra prices: 1 h audio ≈ 53k chars ≈ $0.033,
+  so worst-case cost/user ≈ $4/month — *below* the planned $5–7 sub price,
+  making it impossible to lose money on any user. 120 h/month is invisible
+  to real listeners (~4–5 novels) but useless as a production pipeline.
+- Enforcement needs accounts + persistent usage tracking (deliberately
+  deferred). Jobs already record character counts and measured audio
+  durations, so the meter mostly exists.
+
 ### Fast-follows worth doing next (not yet built)
 
 - MP3 downloads — WAV is ~3 MB per minute; an hour of audio is ~170 MB.
