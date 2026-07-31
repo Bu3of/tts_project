@@ -17,6 +17,10 @@ then open http://127.0.0.1:8000.
 
 import io
 import json
+import os
+import re
+import shutil
+import subprocess
 import uuid
 import wave
 from concurrent.futures import ThreadPoolExecutor
@@ -49,9 +53,13 @@ AUDIO_DIR.mkdir(exist_ok=True)
 # in a database — that's a later problem, deliberately.
 JOBS = {}
 
-# ~200k characters ≈ 4 hours of audio ≈ $0.13 of synthesis. Enough for a
-# hefty book section; a cap mostly to catch accidents, not to ration.
-MAX_JOB_CHARS = 200_000
+# ~1.5M characters ≈ 28 hours of audio ≈ $0.93 of synthesis — room for a
+# full novel in one job. A cap to catch accidents, not to ration.
+MAX_JOB_CHARS = 1_500_000
+
+# How many finished audiobooks to keep on disk (m4b + timing json).
+# Older ones are deleted when a new job starts.
+KEEP_JOBS = 10
 
 
 # ---------------------------------------------------------------------------
@@ -121,8 +129,31 @@ class JobRequest(BaseModel):
     headings: list[str] = []   # chapter titles from extraction, if any
 
 
+def _sweep_audio_dir():
+    """Housekeeping at each new job: finished audiobooks only need their
+    .m4b + .json — the stitched WAV and per-chunk files are redundant once
+    compression succeeded, and they're the bulky part (a WAV is ~15x its
+    M4B). Then keep only the newest KEEP_JOBS audiobooks."""
+    for m4b in AUDIO_DIR.glob("*.m4b"):
+        (AUDIO_DIR / f"{m4b.stem}.wav").unlink(missing_ok=True)
+        chunk_dir = AUDIO_DIR / m4b.stem
+        if chunk_dir.is_dir():
+            shutil.rmtree(chunk_dir, ignore_errors=True)
+
+    finished = sorted(AUDIO_DIR.glob("*.m4b"),
+                      key=lambda p: p.stat().st_mtime, reverse=True)
+    for old in finished[KEEP_JOBS:]:
+        old.unlink(missing_ok=True)
+        (AUDIO_DIR / f"{old.stem}.json").unlink(missing_ok=True)
+
+
 @app.post("/api/jobs")
 def create_job(request: JobRequest, background: BackgroundTasks):
+    try:
+        _sweep_audio_dir()
+    except OSError:
+        pass   # housekeeping must never block a conversion
+
     text = request.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="There's no text to read.")
@@ -192,6 +223,7 @@ def job_status(job_id: str):
     return job
 
 
+@app.head("/api/jobs/{job_id}/audio")   # lets the page probe the format
 @app.get("/api/jobs/{job_id}/audio")
 def job_audio(job_id: str):
     # Route parameters come from the browser, i.e. from anyone. Since this
@@ -209,9 +241,14 @@ def job_audio(job_id: str):
                    f"{job['total_chunks']} chunks).",
         )
 
-    # No entry in JOBS doesn't necessarily mean no audio: the WAV outlives
+    # No entry in JOBS doesn't necessarily mean no audio: the files outlive
     # server restarts even though the in-memory job board doesn't. Serving
     # from disk here is what lets "resume listening" work across restarts.
+    # Prefer the compressed audiobook; fall back to WAV (older conversions,
+    # or ffmpeg unavailable).
+    m4b = AUDIO_DIR / f"{job_id}.m4b"
+    if m4b.exists():
+        return FileResponse(m4b, media_type="audio/mp4")
     path = AUDIO_DIR / f"{job_id}.wav"
     if not path.exists():
         raise HTTPException(status_code=404, detail="Unknown or expired conversion.")
@@ -248,6 +285,81 @@ def job_chunk(job_id: str, index: int):
 # would take as long to convert as to listen to. Sending several requests at
 # once fixes that: 4 in flight ≈ 4x the throughput.
 MAX_PARALLEL_REQUESTS = 4
+
+
+def _find_ffmpeg():
+    """Locate ffmpeg: on PATH if the shell knew about it at server start,
+    otherwise inside winget's install folder (a fresh install isn't visible
+    to already-running programs until they restart)."""
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    winget = Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet"
+    candidates = [winget / "Links" / "ffmpeg.exe",
+                  *sorted((winget / "Packages").glob("Gyan.FFmpeg*/*/bin/ffmpeg.exe"))]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def _ffmeta_escape(value):
+    """ffmpeg's metadata file gives =, ;, # and \\ special meaning."""
+    return re.sub(r"([=;#\\\n])", r"\\\1", value)
+
+
+def _transcode_to_m4b(job_id, wav_path, meta, chapters):
+    """Compress the stitched WAV into an .m4b audiobook (AAC, ~15x smaller)
+    with real chapter marks. Returns True on success; on any failure the
+    WAV simply remains the playable artifact."""
+    ffmpeg = _find_ffmpeg()
+    if ffmpeg is None:
+        return False
+
+    total_ms = int((meta[-1]["start"] + meta[-1]["duration"]) * 1000)
+
+    # ffmpeg reads chapters from a small "FFMETADATA" text file.
+    lines = [";FFMETADATA1"]
+    if meta:
+        lines.append("title=" + _ffmeta_escape(meta[0]["text"][:60]))
+    starts = []
+    for chapter in chapters:
+        chunk = meta[chapter["chunk"]]
+        fraction = chapter["offset"] / max(len(chunk["text"]), 1)
+        starts.append(int((chunk["start"] + fraction * chunk["duration"]) * 1000))
+    for i, chapter in enumerate(chapters):
+        end = starts[i + 1] if i + 1 < len(starts) else total_ms
+        lines += ["[CHAPTER]", "TIMEBASE=1/1000",
+                  f"START={starts[i]}", f"END={end}",
+                  "title=" + _ffmeta_escape(chapter["title"])]
+
+    ffmeta_path = AUDIO_DIR / f"{job_id}.ffmeta"
+    ffmeta_path.write_text("\n".join(lines), encoding="utf-8")
+    m4b_path = AUDIO_DIR / f"{job_id}.m4b"
+
+    try:
+        result = subprocess.run(
+            [ffmpeg, "-y",
+             "-i", str(wav_path),        # input 0: the audio
+             "-i", str(ffmeta_path),     # input 1: title + chapter marks
+             "-map_metadata", "1", "-map", "0:a",
+             "-c:a", "aac", "-b:a", "64k", "-ac", "1",   # speech-grade AAC
+             "-movflags", "+faststart",  # header up front -> browser can stream
+             "-f", "ipod",               # the mp4 flavor .m4b players expect
+             str(m4b_path)],
+            capture_output=True, timeout=3600,
+        )
+        if result.returncode != 0:
+            print("ffmpeg failed:", result.stderr.decode(errors="replace")[-500:])
+            m4b_path.unlink(missing_ok=True)
+            return False
+        return True
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print("ffmpeg error:", error)
+        m4b_path.unlink(missing_ok=True)
+        return False
+    finally:
+        ffmeta_path.unlink(missing_ok=True)
 
 
 def _run_job(job_id, chunks, voice, chapters):
@@ -300,6 +412,16 @@ def _run_job(job_id, chunks, voice, chapters):
                 )
 
                 job["done_chunks"] = i + 1
+
+        # Close the stitched WAV (finalizes its header) before compressing.
+        output.close()
+        output = None
+
+        # "finalizing" = all audio exists, ffmpeg is compressing it into an
+        # .m4b audiobook. The page shows this; playback of chunks continues
+        # undisturbed. If transcoding fails, the WAV stays and works.
+        job["status"] = "finalizing"
+        _transcode_to_m4b(job_id, output_path, meta, chapters)
         job["status"] = "done"
     except Exception as error:
         job["status"] = "error"

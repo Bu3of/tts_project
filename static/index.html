@@ -70,27 +70,34 @@
     .sent.current { background: #ffe9a8; border-radius: 3px; }
     #chapters { max-width: 45%; }
     select { font: inherit; }
-    #resumeBox {
+    #library {
       border: 1px solid #ddd;
       border-radius: 8px;
-      padding: 0.75rem 1rem;
+      padding: 0.5rem 1rem;
       margin-bottom: 1.5rem;
+      font-size: 0.9rem;
+    }
+    .lib-row {
       display: flex;
       justify-content: space-between;
       align-items: center;
       gap: 1rem;
-      font-size: 0.9rem;
+      padding: 0.35rem 0;
     }
+    .lib-row button { padding: 0.25rem 0.7rem; font-size: 0.85rem; }
   </style>
 </head>
 <body>
   <h1>Document to Speech</h1>
 
-  <!-- Shown only when a previous listen was left unfinished. -->
-  <div id="resumeBox" hidden>
-    <span>Continue listening: <strong id="resumeTitle"></strong>
-      at <span id="resumeTime"></span></span>
-    <button id="resumeBtn">Resume</button>
+  <!-- Your recent conversions, resumable at their saved position.
+       The list lives in this browser; audio files for the last 10
+       conversions are kept on the server. -->
+  <div id="library" hidden>
+    <div class="panel-head">
+      <span class="hint">Your conversions</span>
+    </div>
+    <div id="libraryList"></div>
   </div>
 
   <p>
@@ -182,10 +189,8 @@
     const speed = document.getElementById("speed");
     const download = document.getElementById("download");
     const voice = document.getElementById("voice");
-    const resumeBox = document.getElementById("resumeBox");
-    const resumeTitle = document.getElementById("resumeTitle");
-    const resumeTime = document.getElementById("resumeTime");
-    const resumeBtn = document.getElementById("resumeBtn");
+    const libraryBox = document.getElementById("library");
+    const libraryList = document.getElementById("libraryList");
 
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const fmtTime = (s) => {
@@ -549,9 +554,10 @@
     // meanwhile, hop to the stitched file at the exact same position.
     player.addEventListener("ended", () => {
       if (mode !== "chunks") {
-        // Finished listening to the whole thing: nothing left to resume.
-        localStorage.removeItem("resume");
-        resumeBox.hidden = true;
+        // Finished the whole thing — keep it in the library, reset to start.
+        if (currentJob) {
+          upsertLibrary({ id: currentJob.id, title: currentJob.title, seconds: 0 });
+        }
         return;
       }
       chunkIndex += 1;
@@ -566,7 +572,88 @@
       }
     });
 
-    // ---- remember position (resume) --------------------------------------
+    // ---- conversion library (resume, per this browser) -------------------
+    // A list of past conversions with saved positions. Stored locally;
+    // the audio itself lives on the server (last 10 conversions kept).
+    const loadLibrary = () => JSON.parse(localStorage.getItem("library") || "[]");
+    const saveLibrary = (list) =>
+      localStorage.setItem("library", JSON.stringify(list.slice(0, 12)));
+
+    function upsertLibrary(patch) {
+      const list = loadLibrary();
+      const i = list.findIndex((e) => e.id === patch.id);
+      const entry = Object.assign(i >= 0 ? list.splice(i, 1)[0] : {},
+                                  patch, { updated: Date.now() });
+      list.unshift(entry);
+      saveLibrary(list);
+      renderLibrary();
+    }
+
+    function removeFromLibrary(id) {
+      saveLibrary(loadLibrary().filter((e) => e.id !== id));
+      renderLibrary();
+    }
+
+    function renderLibrary() {
+      const list = loadLibrary();
+      libraryBox.hidden = list.length === 0;
+      libraryList.innerHTML = "";
+      for (const entry of list) {
+        const row = document.createElement("div");
+        row.className = "lib-row";
+
+        const info = document.createElement("span");
+        const where = entry.seconds > 10 ? "at " + fmtTime(entry.seconds) : "start";
+        const of = entry.duration ? " of " + fmtTime(entry.duration) : "";
+        info.textContent = entry.title + " — " + where + of;
+        row.appendChild(info);
+
+        const buttons = document.createElement("span");
+        const play = document.createElement("button");
+        play.textContent = entry.seconds > 10 ? "Resume" : "Play";
+        play.addEventListener("click", () => resumeEntry(entry));
+        buttons.appendChild(play);
+        const remove = document.createElement("button");
+        remove.textContent = "✕";
+        remove.title = "Remove from this list";
+        remove.addEventListener("click", () => removeFromLibrary(entry.id));
+        buttons.appendChild(remove);
+        row.appendChild(buttons);
+
+        libraryList.appendChild(row);
+      }
+    }
+
+    // Figure out whether the server has an .m4b or a .wav for this audio,
+    // so the download link saves with an honest file name.
+    async function probeDownloadName(url) {
+      try {
+        const head = await fetch(url, { method: "HEAD" });
+        const type = head.headers.get("content-type") || "";
+        download.setAttribute("download",
+          type.includes("mp4") ? "audiobook.m4b" : "narration.wav");
+      } catch (e) { /* keep whatever name it had */ }
+    }
+
+    function resumeEntry(entry) {
+      currentJob = { id: entry.id, title: entry.title, total: 0 };
+      mode = "full";
+      jobDone = true;
+      resetPanel();
+      fetchMeta(entry.id);   // rebuild the read-along panel if data exists
+      setupMediaSession();
+      pendingSeek = entry.seconds || 0;
+      const audioUrl = `/api/jobs/${entry.id}/audio`;
+      probeDownloadName(audioUrl);
+      player.src = audioUrl;
+      download.href = audioUrl;
+      download.hidden = false;
+      playerRow.hidden = false;
+      player.play();
+      status.textContent = "Resumed.";
+    }
+
+    // Save the listening position into the library every few seconds.
     let lastSave = 0;
     player.addEventListener("timeupdate", () => {
       if (!currentJob || player.paused) return;
@@ -576,42 +663,25 @@
       const seconds = mode === "chunks"
         ? playedSeconds + player.currentTime
         : player.currentTime;
-      localStorage.setItem("resume", JSON.stringify({
-        jobId: currentJob.id, title: currentJob.title, seconds: seconds,
-      }));
+      upsertLibrary({ id: currentJob.id, title: currentJob.title, seconds: seconds });
     });
 
-    // Offer to pick up where the last session left off.
-    const saved = JSON.parse(localStorage.getItem("resume") || "null");
-    if (saved && saved.seconds > 10) {
-      resumeTitle.textContent = saved.title;
-      resumeTime.textContent = fmtTime(saved.seconds);
-      resumeBox.hidden = false;
+    // Migrate the old single-slot "resume" entry into the library, once.
+    const oldResume = JSON.parse(localStorage.getItem("resume") || "null");
+    if (oldResume && oldResume.jobId) {
+      upsertLibrary({ id: oldResume.jobId, title: oldResume.title,
+                      seconds: oldResume.seconds || 0 });
+      localStorage.removeItem("resume");
     }
+    renderLibrary();
 
-    resumeBtn.addEventListener("click", () => {
-      currentJob = { id: saved.jobId, title: saved.title, total: 0 };
-      mode = "full";
-      jobDone = true;
-      resetPanel();
-      fetchMeta(saved.jobId);   // rebuild the read-along panel if data exists
-      setupMediaSession();
-      pendingSeek = saved.seconds;
-      player.src = `/api/jobs/${saved.jobId}/audio`;
-      download.href = `/api/jobs/${saved.jobId}/audio`;
-      download.hidden = false;
-      playerRow.hidden = false;
-      resumeBox.hidden = true;
-      player.play();
-      status.textContent = "Resumed.";
-    });
-
-    // The server forgets conversions eventually (files get cleaned up);
-    // fail politely instead of with a dead player.
+    // The server keeps only recent conversions; fail politely instead of
+    // with a dead player, and drop the stale library entry.
     player.addEventListener("error", () => {
       if (player.src) {
-        status.textContent = "That audio is no longer available — convert the document again.";
+        status.textContent = "That audio is no longer on the server — convert the document again.";
         playerRow.hidden = true;
+        if (currentJob) removeFromLibrary(currentJob.id);
       }
     });
 
@@ -619,7 +689,7 @@
     function updateCount() {
       const n = textBox.value.length;
       counter.textContent = n === 0 ? "" : n.toLocaleString() + " characters"
-        + (n > 200000 ? " — over the 200,000 limit; trim before speaking" : "");
+        + (n > 1500000 ? " — over the 1,500,000 limit; trim before speaking" : "");
     }
     textBox.addEventListener("input", updateCount);
 
@@ -664,7 +734,6 @@
       button.disabled = true;
       playerRow.hidden = true;
       download.hidden = true;
-      resumeBox.hidden = true;
       status.textContent = "Starting the job…";
 
       try {
@@ -738,17 +807,27 @@
 
           if (job.status === "done") break;
 
-          status.textContent = (started ? "Playing — generating chunk " : "Generating chunk ")
-            + Math.min(job.done_chunks + 1, total_chunks) + " of " + total_chunks + "…"
-            + (job.done_chunks === 0
-               ? " (the first chunk can take a minute or two if the model is waking up)"
-               : etaText(job.done_chunks));
+          status.textContent = job.status === "finalizing"
+            ? "All chunks generated — compressing into an audiobook file…"
+            : (started ? "Playing — generating chunk " : "Generating chunk ")
+              + Math.min(job.done_chunks + 1, total_chunks) + " of " + total_chunks + "…"
+              + (job.done_chunks === 0
+                 ? " (the first chunk can take a minute or two if the model is waking up)"
+                 : etaText(job.done_chunks));
           await sleep(1500);
         }
 
         jobDone = true;
-        download.href = "/api/jobs/" + job_id + "/audio";
+        const audioUrl = "/api/jobs/" + job_id + "/audio";
+        probeDownloadName(audioUrl);
+        download.href = audioUrl;
         download.hidden = false;
+        // The finished conversion joins the library, with its total length.
+        upsertLibrary({
+          id: job_id,
+          title: currentJob.title,
+          duration: meta.reduce((sum, m) => sum + m.duration, 0),
+        });
         status.textContent = "All " + total_chunks + " chunk"
           + (total_chunks === 1 ? "" : "s") + " generated.";
 

@@ -105,11 +105,19 @@ Then open `listen.html` in a browser and press play.
   deferred). Jobs already record character counts and measured audio
   durations, so the meter mostly exists.
 
-### Fast-follows worth doing next (not yet built)
+- [x] M4B audiobook output *(built 2026-07-30)* — after stitching, ffmpeg
+      compresses the WAV into an .m4b (AAC 64k mono, faststart) with real
+      chapter marks from the detected chapters; the audio route serves it.
+      Requires ffmpeg (winget install Gyan.FFmpeg); without it, WAV remains.
+- [x] Job cap raised to 1.5M characters (~28 h audio ≈ $0.93) — full-novel
+      conversions in one job
+- [x] Cleanup sweep — at each new job: finished books keep only .m4b+.json
+      (WAV + chunks deleted), and only the 10 newest books are kept
+- [x] Conversion library — browser-local list of past conversions, each
+      resumable at its saved position; stale entries self-remove when the
+      server no longer has the audio
 
-- MP3 downloads — WAV is ~3 MB per minute; an hour of audio is ~170 MB.
-  Converting with ffmpeg would cut that ~6x.
-- Job cleanup — old WAVs accumulate in `audio/`
+### Fast-follows worth doing next (not yet built)
 - Warm-up ping to hide the cold start; longer-term, self-host Kokoro
   (kills cold starts, the ~real-time synthesis ceiling, and per-char costs)
 
