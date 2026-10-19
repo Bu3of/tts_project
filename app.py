@@ -32,7 +32,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from chunker import split_into_chunks
+from chunker import locate_chapters, split_into_chunks
 from extract import ExtractionError, extract_text
 from normalize import normalize
 from tts import SynthesisError, synthesize
@@ -89,13 +89,12 @@ MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 @app.post("/api/extract")
 async def extract(file: UploadFile = File(...)):
     """Receive an uploaded file, send back its cleaned text as JSON."""
-    data = await file.read()
+    # Read at most one byte past the limit, so an oversized upload is
+    # rejected without loading the whole thing into memory.
+    data = await file.read(MAX_UPLOAD_BYTES + 1)
 
     if len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"File is {len(data) // (1024 * 1024)} MB; the limit is 10 MB.",
-        )
+        raise HTTPException(status_code=400, detail="File is over the 10 MB limit.")
 
     try:
         text, headings = extract_text(file.filename, data)
@@ -140,11 +139,16 @@ def _sweep_audio_dir():
         if chunk_dir.is_dir():
             shutil.rmtree(chunk_dir, ignore_errors=True)
 
-    finished = sorted(AUDIO_DIR.glob("*.m4b"),
+    # Every conversion writes a timing .json, with or without ffmpeg, so use
+    # those to find old jobs. Jobs still running are never touched.
+    running = {job_id for job_id, job in JOBS.items()
+               if job["status"] in ("processing", "finalizing")}
+    finished = sorted((p for p in AUDIO_DIR.glob("*.json") if p.stem not in running),
                       key=lambda p: p.stat().st_mtime, reverse=True)
     for old in finished[KEEP_JOBS:]:
-        old.unlink(missing_ok=True)
-        (AUDIO_DIR / f"{old.stem}.json").unlink(missing_ok=True)
+        for suffix in (".m4b", ".wav", ".json"):
+            (AUDIO_DIR / f"{old.stem}{suffix}").unlink(missing_ok=True)
+        shutil.rmtree(AUDIO_DIR / old.stem, ignore_errors=True)
 
 
 @app.post("/api/jobs")
@@ -177,26 +181,13 @@ def create_job(request: JobRequest, background: BackgroundTasks):
         )
 
     # Locate each chapter heading inside the chunks so the player can offer
-    # jump-to-chapter. Headings are normalized the same way the text was —
-    # otherwise "Chapter 3" would never match its spoken form "Chapter three".
-    # A heading that isn't found (edited out, or an EPUB oddity) is dropped.
-    chapters = []
-    for title in request.headings[:200]:
-        key = normalize(title).strip()[:60]
-        if not key:
-            continue
-        for index, chunk in enumerate(chunks):
-            offset = chunk.find(key)
-            if offset != -1:
-                if chapters and chapters[-1]["chunk"] == index \
-                        and chapters[-1]["offset"] == offset:
-                    break   # duplicate heading pointing at the same spot
-                chapters.append({
-                    "title": title.strip()[:80],
-                    "chunk": index,
-                    "offset": offset,   # character position inside the chunk
-                })
-                break
+    # jump-to-chapter. Headings go through the same normalize() as the text
+    # (e.g. "£3,000" in a title becomes words), so they match what's in the
+    # chunks. A heading that isn't found (edited out, or an EPUB oddity) is
+    # dropped.
+    titles = [t for t in request.headings[:200] if t.strip()]
+    keys = [normalize(t).strip() for t in titles]
+    chapters = locate_chapters(chunks, titles, keys)
 
     job_id = uuid.uuid4().hex[:12]   # e.g. "b3f2a91c04d7" — random and unguessable
     JOBS[job_id] = {

@@ -1,5 +1,5 @@
-# Phase 1 dependencies only — more get added as phases progress.
-# Install with:  .venv\Scripts\python.exe -m pip install -r requirements.txt
+# Install with:  pip install -r requirements.txt
+# Optional: ffmpeg on PATH enables M4B audiobook export.
 
 requests        # makes HTTP calls to the DeepInfra API
 python-dotenv   # loads the API key from the .env file

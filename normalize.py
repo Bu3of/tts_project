@@ -36,16 +36,20 @@ def _words(number_text):
 
 # --- individual rules -------------------------------------------------------
 
-CURRENCY_NAMES = {"£": ("pound", "pence"), "$": ("dollar", "cents"), "€": ("euro", "cents")}
+CURRENCY_NAMES = {"£": ("pound", "pence", "penny"), "$": ("dollar", "cents", "cent"),
+                  "€": ("euro", "cents", "cent")}
 
 
 def _currency(match):
     """'£3,000' -> 'three thousand pounds'; '£3.50' -> 'three pounds fifty'."""
     symbol, amount = match.group(1), match.group(2)
-    unit, subunit = CURRENCY_NAMES[symbol]
+    unit, subunit, subunit_one = CURRENCY_NAMES[symbol]
     value = float(amount.replace(",", ""))
     whole = int(value)
     cents = round((value - whole) * 100)
+    if whole == 0 and cents:
+        # "$0.50" -> "fifty cents", not "zero dollars fifty"
+        return f"{_words(str(cents))} {subunit_one if cents == 1 else subunit}"
     text = f"{_words(str(whole))} {unit}{'' if whole == 1 else 's'}"
     if cents:
         text += f" {_words(str(cents))}"

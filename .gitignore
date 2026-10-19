@@ -17,3 +17,6 @@ audio/
 
 # Unrelated file that lives in this folder (an ML chart from another project)
 output.png
+
+# Test cache
+.pytest_cache/

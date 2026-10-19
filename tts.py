@@ -9,6 +9,7 @@ audio bytes back, without knowing or caring where they came from.
 """
 
 import os
+import time
 
 import requests
 from dotenv import load_dotenv
@@ -26,6 +27,9 @@ DEFAULT_VOICE = "af_heart"   # chosen by ear test, 2026-07-29
 # a second or two. Hence the patient timeout.
 TIMEOUT_SECONDS = 300
 
+# Attempts per chunk for transient failures (network errors, 429, 5xx).
+MAX_ATTEMPTS = 3
+
 
 class SynthesisError(Exception):
     """Raised when synthesis fails, with a human-readable explanation."""
@@ -42,21 +46,35 @@ def synthesize(text, voice=DEFAULT_VOICE):
             "No DEEPINFRA_API_KEY found. Copy .env.example to .env and add your key."
         )
 
-    response = requests.post(
-        URL,
-        json={
-            "model": MODEL,
-            "input": text,
-            "voice": voice,
-            "response_format": "wav",
-        },
-        headers={"Authorization": f"Bearer {API_KEY}"},
-        timeout=TIMEOUT_SECONDS,
-    )
+    # A long book is hundreds of requests, so one dropped connection or a
+    # brief 5xx shouldn't fail the whole job. Retry those a few times with a
+    # growing pause; anything else (bad key, bad input) fails immediately.
+    last_error = None
+    for attempt in range(MAX_ATTEMPTS):
+        if attempt:
+            time.sleep(2 ** attempt)
+        try:
+            response = requests.post(
+                URL,
+                json={
+                    "model": MODEL,
+                    "input": text,
+                    "voice": voice,
+                    "response_format": "wav",
+                },
+                headers={"Authorization": f"Bearer {API_KEY}"},
+                timeout=TIMEOUT_SECONDS,
+            )
+        except requests.RequestException as error:
+            last_error = SynthesisError(f"Request to DeepInfra failed: {error}")
+            continue
 
-    if response.status_code != 200:
-        raise SynthesisError(
+        if response.status_code == 200:
+            return response.content
+        last_error = SynthesisError(
             f"DeepInfra returned status {response.status_code}: {response.text[:300]}"
         )
+        if response.status_code != 429 and response.status_code < 500:
+            break
 
-    return response.content
+    raise last_error

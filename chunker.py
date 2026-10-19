@@ -59,6 +59,50 @@ def split_into_chunks(text, budget=CHUNK_CHARS):
     return chunks
 
 
+def locate_chapters(chunks, titles, keys):
+    """Find where each chapter heading sits inside the chunks.
+
+    `titles` are the display titles and `keys` the same headings after
+    normalize(). Returns [{"title", "chunk", "offset"}] in reading order.
+
+    Books often open with a table of contents that repeats every heading, so
+    the first match is usually the wrong one. Headings are therefore matched
+    as whole paragraphs, and placed from the last heading backwards: each one
+    takes its latest occurrence that still comes before the next chapter.
+    That lands on the real chapter starts instead of the contents page.
+    """
+    found = []
+    for key in keys:
+        positions = []
+        if key:
+            standalone = re.compile(r"(?:^|(?<=\n\n))" + re.escape(key) + r"(?=\n\n|$)")
+            for index, chunk in enumerate(chunks):
+                positions += [(index, m.start()) for m in standalone.finditer(chunk)]
+            if not positions:
+                # Fall back to an in-text match, but never "Chapter 1" inside "Chapter 12".
+                loose = re.compile(re.escape(key) + r"(?!\w)")
+                for index, chunk in enumerate(chunks):
+                    positions += [(index, m.start()) for m in loose.finditer(chunk)]
+        found.append(positions)
+
+    placed = [None] * len(keys)
+    limit = (len(chunks), 0)
+    for i in range(len(keys) - 1, -1, -1):
+        earlier = [p for p in found[i] if p < limit]
+        if earlier:
+            placed[i] = max(earlier)
+            limit = placed[i]
+
+    chapters = []
+    for title, pos in zip(titles, placed):
+        if pos is None:
+            continue
+        if chapters and (chapters[-1]["chunk"], chapters[-1]["offset"]) == pos:
+            continue   # duplicate heading pointing at the same spot
+        chapters.append({"title": title.strip()[:80], "chunk": pos[0], "offset": pos[1]})
+    return chapters
+
+
 def _split_long_paragraph(paragraph, budget):
     """Cut an oversized paragraph into budget-sized groups of sentences."""
     groups = []
